@@ -1,0 +1,13 @@
+node_modules
+.dist
+dist
+.env
+.env.*
+.vscode
+.vercel
+.DS_Store
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+.idea
+*.log

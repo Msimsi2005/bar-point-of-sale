@@ -1,0 +1,67 @@
+import { API_BASE, SUPABASE_ANON_KEY } from "./supabase";
+
+async function call(path: string, method = "GET", body?: unknown, token?: string) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token ?? SUPABASE_ANON_KEY}`,
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? "Request failed");
+  return data;
+}
+
+// ── Superadmin ───────────────────────────────────────────────────────────────
+
+export async function apiAdminLogin(email: string, password: string) {
+  return call("/admin/login", "POST", { email, password });
+}
+
+export async function apiAdminListTenants(token: string) {
+  return call("/admin/tenants", "GET", undefined, token);
+}
+
+export async function apiAdminCreateTenant(token: string, data: {
+  email: string; password: string; businessName: string; plan: string;
+}) {
+  return call("/admin/tenants", "POST", data, token);
+}
+
+export async function apiAdminUpdateTenant(token: string, email: string, patch: {
+  plan?: string; password?: string;
+}) {
+  return call(`/admin/tenants/${encodeURIComponent(email)}`, "PATCH", patch, token);
+}
+
+export async function apiAdminDeleteTenant(token: string, email: string) {
+  return call(`/admin/tenants/${encodeURIComponent(email)}`, "DELETE", undefined, token);
+}
+
+// ── Venue ────────────────────────────────────────────────────────────────────
+
+export async function apiLogin(email: string, password: string) {
+  return call("/auth/login", "POST", { email, password });
+}
+
+export async function apiRegister(email: string, password: string, businessName: string) {
+  return call("/auth/register", "POST", { email, password, businessName });
+}
+
+export async function apiGetTenant(email: string) {
+  return call(`/tenant/${encodeURIComponent(email)}`);
+}
+
+export async function apiSaveTenant(email: string, patch: object) {
+  return call(`/tenant/${encodeURIComponent(email)}`, "PUT", patch);
+}
+
+export async function apiAddSale(email: string, sale: object) {
+  return call(`/tenant/${encodeURIComponent(email)}/sale`, "POST", sale);
+}
+
+export async function apiGetSales(email: string) {
+  return call(`/tenant/${encodeURIComponent(email)}/sales`);
+}
