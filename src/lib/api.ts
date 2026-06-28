@@ -30,6 +30,18 @@ export async function apiAdminCreateTenant(token: string, data: {
   return call("/admin/tenants", "POST", data, token);
 }
 
+export async function apiAdminCreateInvite(token: string, email: string, businessName: string, plan?: string) {
+  return call("/admin/invites", "POST", { email, businessName, plan }, token);
+}
+
+export async function apiAdminListInvites(token: string) {
+  return call("/admin/invites", "GET", undefined, token);
+}
+
+export async function apiAdminDeleteInvite(token: string, inviteToken: string) {
+  return call(`/admin/invites/${encodeURIComponent(inviteToken)}`, "DELETE", undefined, token);
+}
+
 export async function apiAdminUpdateTenant(token: string, email: string, patch: {
   plan?: string; password?: string;
 }) {
@@ -46,8 +58,8 @@ export async function apiLogin(email: string, password: string) {
   return call("/auth/login", "POST", { email, password });
 }
 
-export async function apiRegister(email: string, password: string, businessName: string) {
-  return call("/auth/register", "POST", { email, password, businessName });
+export async function apiRegister(email: string, password: string, businessName: string, inviteToken: string) {
+  return call("/auth/register", "POST", { email, password, businessName, inviteToken });
 }
 
 export async function apiGetTenant(email: string) {

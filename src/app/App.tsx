@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   apiLogin, apiSaveTenant, apiAddSale,
   apiAdminLogin, apiAdminListTenants, apiAdminCreateTenant,
+  apiAdminCreateInvite, apiAdminListInvites, apiAdminDeleteInvite,
   apiAdminUpdateTenant, apiAdminDeleteTenant, apiExecuteSql,
 } from "../lib/api";
 import {
@@ -379,24 +380,33 @@ interface TenantSummary { email: string; name: string; plan: string; createdAt: 
 
 function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => void }) {
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
+  const [invites, setInvites] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ email: "", password: "", businessName: "", plan: "starter" });
   const [formError, setFormError] = useState(""); const [formLoading, setFormLoading] = useState(false); const [formSuccess, setFormSuccess] = useState("");
+  const [inviteForm, setInviteForm] = useState({ email: "", businessName: "", plan: "starter" });
+  const [inviteError, setInviteError] = useState(""); const [inviteLoading, setInviteLoading] = useState(false); const [inviteSuccess, setInviteSuccess] = useState("");
   const [deletingEmail, setDeletingEmail] = useState<string | null>(null);
+  const [deletingInvite, setDeletingInvite] = useState<string | null>(null);
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
   const [editPlan, setEditPlan] = useState("starter"); const [editPw, setEditPw] = useState(""); const [editLoading, setEditLoading] = useState(false);
   const [sqlText, setSqlText] = useState("SELECT email, name, plan, createdAt FROM tenants LIMIT 25;");
   const [sqlResult, setSqlResult] = useState<any | null>(null);
   const [sqlError, setSqlError] = useState(""); const [sqlLoading, setSqlLoading] = useState(false);
 
-  useEffect(() => { loadTenants(); }, []);
+  useEffect(() => { loadTenants(); loadInvites(); }, []);
 
   async function loadTenants() {
     setLoading(true);
     try { setTenants(await apiAdminListTenants(token)); }
     catch (e: unknown) { setError(e instanceof Error ? e.message : "Failed to load"); }
     finally { setLoading(false); }
+  }
+
+  async function loadInvites() {
+    try { setInvites(await apiAdminListInvites(token)); }
+    catch (e: unknown) { /* ignore invite load errors for now */ }
   }
 
   async function handleCreate() {
@@ -410,6 +420,26 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
       loadTenants();
     } catch (e: unknown) { setFormError(e instanceof Error ? e.message : "Failed to register"); }
     finally { setFormLoading(false); }
+  }
+
+  async function handleInviteCreate() {
+    if (!inviteForm.email.trim() || !inviteForm.businessName.trim()) { setInviteError("Email and business name are required."); return; }
+    setInviteLoading(true); setInviteError(""); setInviteSuccess("");
+    try {
+      const result = await apiAdminCreateInvite(token, inviteForm.email.trim(), inviteForm.businessName.trim(), inviteForm.plan);
+      setInviteSuccess(`Invite created for ${result.email}. Token: ${result.inviteToken}`);
+      setInviteForm({ email: "", businessName: "", plan: "starter" });
+      loadInvites();
+    } catch (e: unknown) { setInviteError(e instanceof Error ? e.message : "Failed to create invite"); }
+    finally { setInviteLoading(false); }
+  }
+
+  async function handleInviteDelete(token: string) {
+    if (!window.confirm("Delete this invite?")) return;
+    setDeletingInvite(token);
+    try { await apiAdminDeleteInvite(token); loadInvites(); }
+    catch (e: unknown) { alert(e instanceof Error ? e.message : "Failed to delete invite"); }
+    finally { setDeletingInvite(null); }
   }
 
   async function handleDelete(email: string) {
@@ -504,6 +534,64 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
             <Plus size={14} /> {formLoading ? "Registering…" : "REGISTER COMPANY"}
           </button>
           <p className="text-xs text-muted-foreground mt-3">Default staff PIN is <span className="font-mono font-bold text-foreground">1234</span> — the owner can change it in their Admin panel.</p>
+        </div>
+
+        <div className="rounded-2xl border border-border bg-card/20 p-6">
+          <div className="flex items-center gap-2 mb-5">
+            <Plus size={16} className="text-primary" />
+            <h2 className="text-lg font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Create Invite</h2>
+          </div>
+          {inviteError && <div className="flex items-center gap-2 rounded-lg bg-red-900/20 border border-red-900/30 px-3 py-2.5 text-xs text-red-400 mb-4"><AlertCircle size={13} />{inviteError}</div>}
+          {inviteSuccess && <div className="flex items-center gap-2 rounded-lg bg-green-900/20 border border-green-900/30 px-3 py-2.5 text-xs text-green-400 mb-4"><CheckCircle size={13} />{inviteSuccess}</div>}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Invite Email *</label>
+              <input type="email" value={inviteForm.email} onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })} placeholder="owner@venue.co.za" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Business Name *</label>
+              <input value={inviteForm.businessName} onChange={(e) => setInviteForm({ ...inviteForm, businessName: e.target.value })} placeholder="Noir & Vine" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Plan</label>
+              <select value={inviteForm.plan} onChange={(e) => setInviteForm({ ...inviteForm, plan: e.target.value })} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">
+                <option value="starter">Starter — R299/mo</option>
+                <option value="pro">Professional — R799/mo</option>
+                <option value="enterprise">Enterprise — R1,999/mo</option>
+              </select>
+            </div>
+            <div className="flex items-end">
+              <button onClick={handleInviteCreate} disabled={inviteLoading} className="w-full rounded-xl bg-primary text-primary-foreground px-6 py-3 text-sm font-bold hover:opacity-90 disabled:opacity-50 transition-opacity" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
+                {inviteLoading ? "Creating…" : "CREATE INVITE"}
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">Invite tokens are single-use and secure registration for a specific email.</p>
+        </div>
+
+        <div className="rounded-2xl border border-border bg-card/20 p-6">
+          <div className="flex items-center gap-2 mb-5">
+            <Users size={16} className="text-primary" />
+            <h2 className="text-lg font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Pending Invites</h2>
+          </div>
+          {invites.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No pending invites. Create one to let venues register.</p>
+          ) : (
+            <div className="space-y-3">
+              {invites.map((invite) => (
+                <div key={invite.token} className="rounded-xl border border-border bg-background p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <p className="font-semibold text-foreground">{invite.businessName}</p>
+                    <p className="text-xs text-muted-foreground">{invite.email} • {invite.plan} • created {new Date(invite.createdAt).toLocaleDateString()}</p>
+                    <p className="text-xs text-muted-foreground mt-1">Token: <span className="font-mono text-foreground">{invite.token}</span></p>
+                  </div>
+                  <button onClick={() => handleInviteDelete(invite.token)} disabled={deletingInvite === invite.token} className="rounded-xl border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">
+                    {deletingInvite === invite.token ? "Deleting…" : "Delete Invite"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Companies list */}
@@ -681,7 +769,9 @@ function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant) => void; onBack:
           <button onClick={handleLogin} disabled={loading} className="w-full rounded-xl bg-primary text-primary-foreground py-3.5 font-bold text-sm tracking-wide hover:opacity-90 transition-opacity disabled:opacity-60" style={{ fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.06em" }}>
             {loading ? "Signing in…" : "ACCESS MY POS"}
           </button>
-          <p className="text-center text-xs text-muted-foreground mt-4">Don't have access? Contact your PourPOS administrator.</p>
+          <div className="mt-4 text-center text-xs text-muted-foreground">
+            <p>Need access? Ask your PourPOS administrator for an invite token.</p>
+          </div>
         </div>
       </div>
     </div>

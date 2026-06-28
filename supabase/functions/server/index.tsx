@@ -56,12 +56,25 @@ async function hashPassword(pw: string): Promise<string> {
 
 function tenantKey(email: string) { return `tenant:${email.toLowerCase().trim()}`; }
 function salesKey(email: string)  { return `sales:${email.toLowerCase().trim()}`; }
+function inviteKey(token: string) { return `invite:${token}`; }
 const INDEX_KEY = "tenant_index";
+const INVITE_INDEX_KEY = "invite_index";
 
 async function addToIndex(entry: object) {
   const index: any[] = (await kv.get(INDEX_KEY)) ?? [];
   index.push(entry);
   await kv.set(INDEX_KEY, index);
+}
+
+async function addInviteToIndex(entry: object) {
+  const index: any[] = (await kv.get(INVITE_INDEX_KEY)) ?? [];
+  index.push(entry);
+  await kv.set(INVITE_INDEX_KEY, index);
+}
+
+async function removeInviteFromIndex(token: string) {
+  const index: any[] = (await kv.get(INVITE_INDEX_KEY)) ?? [];
+  await kv.set(INVITE_INDEX_KEY, index.filter((t: any) => t.token !== token));
 }
 
 async function removeFromIndex(email: string) {
@@ -79,10 +92,55 @@ app.post("/make-server-b88a7963/admin/login", async (c) => {
   return c.json({ token: SUPERADMIN_PASSWORD });
 });
 
+// ── SUPERADMIN: invite management ─────────────────────────────────────────────
+app.post("/make-server-b88a7963/admin/invites", async (c) => {
+  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
+
+  const { email, businessName, plan } = await c.req.json();
+  if (!email || !businessName) return c.json({ error: "Missing fields" }, 400);
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const inviteToken = crypto.randomUUID();
+  const invite = {
+    token: inviteToken,
+    email: normalizedEmail,
+    businessName,
+    plan: plan ?? "starter",
+    createdAt: new Date().toISOString(),
+  };
+
+  await kv.set(inviteKey(inviteToken), invite);
+  await addInviteToIndex(invite);
+
+  return c.json({ inviteToken, email: normalizedEmail, businessName: invite.businessName, plan: invite.plan }, 201);
+});
+
+app.get("/make-server-b88a7963/admin/invites", async (c) => {
+  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
+  const invites = (await kv.get(INVITE_INDEX_KEY)) ?? [];
+  return c.json(invites);
+});
+
+app.delete("/make-server-b88a7963/admin/invites/:token", async (c) => {
+  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
+  const token = c.req.param("token");
+  await kv.del(inviteKey(token));
+  await removeInviteFromIndex(token);
+  return c.json({ ok: true });
+});
+
 // ── VENUE: register ──────────────────────────────────────────────────────────
 app.post("/make-server-b88a7963/auth/register", async (c) => {
-  const { email, password, businessName } = await c.req.json();
-  if (!email || !password || !businessName) return c.json({ error: "Missing fields" }, 400);
+  const { email, password, businessName, inviteToken } = await c.req.json();
+  if (!email || !password || !businessName || !inviteToken) {
+    return c.json({ error: "Missing fields or invite token" }, 400);
+  }
+
+  const invite = await kv.get(inviteKey(inviteToken));
+  if (!invite) return c.json({ error: "Invite token is invalid or expired" }, 403);
+  if (invite.email.toLowerCase().trim() !== email.toLowerCase().trim()) {
+    return c.json({ error: "Invite email does not match registration email" }, 403);
+  }
 
   const existing = await kv.get(tenantKey(email));
   if (existing) return c.json({ error: "Email already registered" }, 409);
@@ -94,7 +152,7 @@ app.post("/make-server-b88a7963/auth/register", async (c) => {
     id: crypto.randomUUID(),
     email: email.toLowerCase().trim(),
     passwordHash,
-    plan: "starter",
+    plan: invite.plan ?? "starter",
     businessInfo: {
       name: businessName,
       logo: null,
@@ -115,6 +173,8 @@ app.post("/make-server-b88a7963/auth/register", async (c) => {
   await kv.set(tenantKey(email), tenant);
   await kv.set(salesKey(email), []);
   await addToIndex({ email: tenant.email, name: businessName, plan: tenant.plan, createdAt: tenant.createdAt });
+  await kv.del(inviteKey(inviteToken));
+  await removeInviteFromIndex(inviteToken);
 
   const { passwordHash: _, ...safe } = tenant;
   return c.json({ ...safe, sales: [] }, 201);
