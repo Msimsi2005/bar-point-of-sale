@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   apiLogin, apiSaveTenant, apiAddSale,
   apiAdminLogin, apiAdminListTenants, apiAdminCreateTenant,
-  apiAdminUpdateTenant, apiAdminDeleteTenant,
+  apiAdminUpdateTenant, apiAdminDeleteTenant, apiExecuteSql,
 } from "../lib/api";
 import {
   X, Plus, Minus, CreditCard, Banknote, Users, Clock, ChevronRight,
@@ -386,6 +386,9 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
   const [deletingEmail, setDeletingEmail] = useState<string | null>(null);
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
   const [editPlan, setEditPlan] = useState("starter"); const [editPw, setEditPw] = useState(""); const [editLoading, setEditLoading] = useState(false);
+  const [sqlText, setSqlText] = useState("SELECT email, name, plan, createdAt FROM tenants LIMIT 25;");
+  const [sqlResult, setSqlResult] = useState<any | null>(null);
+  const [sqlError, setSqlError] = useState(""); const [sqlLoading, setSqlLoading] = useState(false);
 
   useEffect(() => { loadTenants(); }, []);
 
@@ -424,8 +427,21 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
       if (editPw.trim().length >= 6) patch.password = editPw.trim();
       await apiAdminUpdateTenant(token, email, patch);
       setEditingEmail(null); setEditPw(""); loadTenants();
-    } catch (e: unknown) { alert(e instanceof Error ? e.message : "Failed to update"); }
+    } catch (e: unknown) { alert(e instanceof Error ? e instanceof Error ? e.message : "Failed to update" : "Failed to update"); }
     finally { setEditLoading(false); }
+  }
+
+  async function runSql() {
+    if (!sqlText.trim()) { setSqlError("Enter a SQL query."); return; }
+    setSqlLoading(true); setSqlError(""); setSqlResult(null);
+    try {
+      const data = await apiExecuteSql(token, sqlText);
+      setSqlResult(data);
+    } catch (e: unknown) {
+      setSqlError(e instanceof Error ? e.message : "SQL execution failed");
+    } finally {
+      setSqlLoading(false);
+    }
   }
 
   const planBadge = (plan: string) => {
@@ -561,6 +577,57 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
                   )}
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-2xl border border-border bg-card/30 p-6 mt-8">
+          <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+            <div>
+              <h2 className="text-lg font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>SQL Editor</h2>
+              <p className="text-sm text-muted-foreground">Run SQL against your Supabase database from the superadmin portal.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={runSql} disabled={sqlLoading} className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50">{sqlLoading ? "Running…" : "Execute SQL"}</button>
+              <button onClick={() => { setSqlText(""); setSqlResult(null); setSqlError(""); }} className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground">Clear</button>
+            </div>
+          </div>
+
+          <textarea value={sqlText} onChange={(e) => setSqlText(e.target.value)} rows={8} className="w-full rounded-2xl bg-[#121212] border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50 font-mono" placeholder="SELECT * FROM my_table WHERE ..." />
+
+          {sqlError && <div className="mt-4 rounded-lg border border-red-700/30 bg-red-900/10 px-4 py-3 text-sm text-red-300">{sqlError}</div>}
+
+          {sqlResult && (
+            <div className="mt-4 rounded-2xl border border-border bg-background/60 p-4">
+              <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Result</p>
+              {Array.isArray(sqlResult.result) ? (
+                sqlResult.result.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No rows returned.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full border-separate border-spacing-0 text-sm">
+                      <thead>
+                        <tr className="bg-white/5">
+                          {Object.keys(sqlResult.result[0]).map((key) => (
+                            <th key={key} className="border-b border-border px-3 py-2 text-left text-xs uppercase tracking-widest text-muted-foreground">{key}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sqlResult.result.map((row: any, rowIndex: number) => (
+                          <tr key={rowIndex} className={rowIndex % 2 === 0 ? "bg-white/5" : "bg-transparent"}>
+                            {Object.values(row).map((value, colIndex) => (
+                              <td key={colIndex} className="border-b border-border px-3 py-2 align-top text-xs text-foreground font-mono">{typeof value === "object" ? JSON.stringify(value) : String(value)}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              ) : (
+                <pre className="whitespace-pre-wrap break-words text-xs text-foreground font-mono">{JSON.stringify(sqlResult, null, 2)}</pre>
+              )}
             </div>
           )}
         </div>

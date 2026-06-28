@@ -1,6 +1,7 @@
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
+import { createClient } from "npm:@supabase/postgres-js";
 import * as kv from "./kv_store.tsx";
 
 const app = new Hono();
@@ -26,6 +27,26 @@ function isSuperAdmin(c: any): boolean {
 
 // ── Health ──────────────────────────────────────────────────────────────────
 app.get("/make-server-b88a7963/health", (c) => c.json({ status: "ok" }));
+
+// ── SQL execution (superadmin only) ───────────────────────────────────────────
+app.post("/make-server-b88a7963/sql", async (c) => {
+  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
+
+  const { sql } = await c.req.json();
+  if (!sql || typeof sql !== "string") return c.json({ error: "Missing SQL statement" }, 400);
+
+  const dbUrl = Deno.env.get("SUPABASE_DB_URL");
+  if (!dbUrl) return c.json({ error: "SUPABASE_DB_URL is not configured" }, 500);
+
+  const client = createClient(dbUrl);
+  const result = await client.query(sql);
+
+  if (result.error) {
+    return c.json({ error: result.error.message ?? "SQL execution failed" }, 400);
+  }
+
+  return c.json({ result: result.data ?? null, command: result.command ?? null, count: result.count ?? null });
+});
 
 // ── Password helper ─────────────────────────────────────────────────────────
 async function hashPassword(pw: string): Promise<string> {
@@ -56,6 +77,47 @@ app.post("/make-server-b88a7963/admin/login", async (c) => {
   }
   // Return the password as the bearer token (simple, server-verified on each request)
   return c.json({ token: SUPERADMIN_PASSWORD });
+});
+
+// ── VENUE: register ──────────────────────────────────────────────────────────
+app.post("/make-server-b88a7963/auth/register", async (c) => {
+  const { email, password, businessName } = await c.req.json();
+  if (!email || !password || !businessName) return c.json({ error: "Missing fields" }, 400);
+
+  const existing = await kv.get(tenantKey(email));
+  if (existing) return c.json({ error: "Email already registered" }, 409);
+
+  const passwordHash = await hashPassword(password);
+  const staffOwnerId = crypto.randomUUID();
+
+  const tenant = {
+    id: crypto.randomUUID(),
+    email: email.toLowerCase().trim(),
+    passwordHash,
+    plan: "starter",
+    businessInfo: {
+      name: businessName,
+      logo: null,
+      address: "",
+      phone: "",
+      email: email.toLowerCase().trim(),
+      website: "",
+      regNumber: "",
+      vatNumber: "",
+    },
+    config: defaultConfig(),
+    menu: [],
+    customers: [],
+    staff: [{ id: staffOwnerId, name: businessName, pin: "1234", role: "owner" }],
+    createdAt: new Date().toISOString(),
+  };
+
+  await kv.set(tenantKey(email), tenant);
+  await kv.set(salesKey(email), []);
+  await addToIndex({ email: tenant.email, name: businessName, plan: tenant.plan, createdAt: tenant.createdAt });
+
+  const { passwordHash: _, ...safe } = tenant;
+  return c.json({ ...safe, sales: [] }, 201);
 });
 
 // ── SUPERADMIN: list all tenants ─────────────────────────────────────────────

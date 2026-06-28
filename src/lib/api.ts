@@ -65,3 +65,7 @@ export async function apiAddSale(email: string, sale: object) {
 export async function apiGetSales(email: string) {
   return call(`/tenant/${encodeURIComponent(email)}/sales`);
 }
+
+export async function apiExecuteSql(token: string, sql: string) {
+  return call("/sql", "POST", { sql }, token);
+}
