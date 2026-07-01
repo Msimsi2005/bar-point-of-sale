@@ -4,7 +4,7 @@ import {
   apiAdminLogin, apiAdminListTenants, apiAdminCreateTenant,
   apiAdminUpdateTenant, apiAdminDeleteTenant, apiExecuteSql,
 } from "../lib/api";
-import { API_BASE } from "../lib/supabase";
+import { API_BASE, SUPABASE_ANON_KEY } from "../lib/supabase";
 import {
   X, Plus, Minus, CreditCard, Banknote, Users, Clock, ChevronRight,
   Receipt, Trash2, AlertCircle, Settings, ShoppingBag, Monitor,
@@ -113,18 +113,26 @@ function calcTax(sub: number, cfg: TenantConfig) { return cfg.vatEnabled ? sub *
 // Convert API row → Tenant
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function rowToTenant(row: any): Tenant {
+  const rawConfig = row.config ?? {};
+  const mergedConfig = makeConfig({
+    ...rawConfig,
+    currencies: Array.isArray(rawConfig.currencies) ? rawConfig.currencies : makeConfig().currencies,
+    paymentMethods: Array.isArray(rawConfig.paymentMethods) ? rawConfig.paymentMethods : makeConfig().paymentMethods,
+    categories: Array.isArray(rawConfig.categories) ? rawConfig.categories : makeConfig().categories,
+  });
+
   return {
     id: row.id,
     email: row.email,
     password: "",
     plan: row.plan ?? "starter",
     businessInfo: row.businessInfo ?? row.business_info ?? { name: "", logo: null, address: "", phone: "", email: row.email, website: "", regNumber: "", vatNumber: "" },
-    config: row.config ?? makeConfig(),
+    config: mergedConfig,
     menu: (row.menu ?? []).map((m: any) => ({ ...m })),
     sales: (row.sales ?? []).map((s: any) => ({ ...s, timestamp: new Date(s.timestamp ?? s.savedAt ?? Date.now()) })),
     customers: (row.customers ?? []).map((c: any) => ({ id: c.id, name: c.name, email: c.email ?? "", phone: c.phone ?? "", totalSpent: c.total_spent ?? c.totalSpent ?? 0, visits: c.visits ?? 0, notes: c.notes ?? "" })),
     staff: (row.staff ?? []).map((s: any) => ({ id: s.id, name: s.name, pin: s.pin, role: s.role })),
-    createdAt: new Date(row.createdAt ?? Date.now()),
+    createdAt: new Date(row.createdAt ?? row.created_at ?? Date.now()),
   };
 }
 
@@ -1525,7 +1533,10 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+        },
         body: JSON.stringify({ email: "healthcheck@invalid.local", password: "invalid" }),
       });
 
