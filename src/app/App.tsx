@@ -100,6 +100,7 @@ interface TenantConfig {
   defaultPrinterId?: string;
   defaultScannerId?: string;
   posState?: PersistedPosState;
+  stockMovements?: StockMovementRecord[];
 }
 
 interface BusinessInfo {
@@ -125,6 +126,29 @@ interface SaleRecord {
   paymentMethod: string; currencyCode: string; currencySymbol: string;
   timestamp: Date; staffId: string; customerId?: string;
   prepaid?: number; change?: number;
+}
+
+interface StockMovementLine {
+  itemId: string;
+  itemName: string;
+  previousStock: number;
+  received: number;
+  damaged: number;
+  net: number;
+  nextStock: number;
+}
+
+interface StockMovementRecord {
+  id: string;
+  timestamp: string;
+  staffId: string;
+  staffName: string;
+  lines: StockMovementLine[];
+  totals: {
+    received: number;
+    damaged: number;
+    net: number;
+  };
 }
 
 interface Tenant {
@@ -332,6 +356,7 @@ function rowToTenant(row: any): Tenant {
     categories: Array.isArray(rawConfig.categories) ? rawConfig.categories : makeConfig().categories,
     printers: Array.isArray(rawConfig.printers) ? rawConfig.printers : makeConfig().printers,
     scanners: Array.isArray(rawConfig.scanners) ? rawConfig.scanners : makeConfig().scanners,
+    stockMovements: Array.isArray(rawConfig.stockMovements) ? rawConfig.stockMovements : makeConfig().stockMovements,
   });
 
   const normalizedConfig: TenantConfig = {
@@ -366,6 +391,43 @@ function rowToTenant(row: any): Tenant {
     })),
     defaultPrinterId: mergedConfig.defaultPrinterId,
     defaultScannerId: mergedConfig.defaultScannerId,
+    stockMovements: (mergedConfig.stockMovements ?? [])
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") return null;
+        const rawEntry = entry as Partial<StockMovementRecord>;
+        const lines = Array.isArray(rawEntry.lines)
+          ? rawEntry.lines
+            .map((line) => {
+              if (!line || typeof line !== "object") return null;
+              const rawLine = line as Partial<StockMovementLine>;
+              if (!rawLine.itemId || !rawLine.itemName) return null;
+              return {
+                itemId: String(rawLine.itemId),
+                itemName: String(rawLine.itemName),
+                previousStock: Number(rawLine.previousStock ?? 0),
+                received: Number(rawLine.received ?? 0),
+                damaged: Number(rawLine.damaged ?? 0),
+                net: Number(rawLine.net ?? 0),
+                nextStock: Number(rawLine.nextStock ?? 0),
+              } as StockMovementLine;
+            })
+            .filter((line): line is StockMovementLine => line !== null)
+          : [];
+
+        return {
+          id: String(rawEntry.id ?? uid()),
+          timestamp: String(rawEntry.timestamp ?? new Date().toISOString()),
+          staffId: String(rawEntry.staffId ?? "unknown"),
+          staffName: String(rawEntry.staffName ?? "Unknown"),
+          lines,
+          totals: {
+            received: Number(rawEntry.totals?.received ?? 0),
+            damaged: Number(rawEntry.totals?.damaged ?? 0),
+            net: Number(rawEntry.totals?.net ?? 0),
+          },
+        } as StockMovementRecord;
+      })
+      .filter((entry): entry is StockMovementRecord => entry !== null),
   };
 
   return {
@@ -427,6 +489,7 @@ function makeConfig(overrides: Partial<TenantConfig> = {}): TenantConfig {
     scanners: [],
     defaultPrinterId: undefined,
     defaultScannerId: undefined,
+    stockMovements: [],
     ...overrides,
   };
 }
@@ -1308,6 +1371,11 @@ function SalesSection({ sales }: { sales: SaleRecord[] }) {
 function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdate, onBack }: { tenant: Tenant; currentStaffId: string; onTenantChange: (t: Tenant) => void; onCredentialsUpdate: (patch: { loginEmail?: string; password?: string; staffId: string; pin?: string; }) => Promise<void>; onBack: () => void; }) {
   const [section, setSection] = useState<AdminSection>("products");
   const [editingProduct, setEditingProduct] = useState<MenuItem | null>(null);
+  const [showReceiveStock, setShowReceiveStock] = useState(false);
+  const [expandedStockMovementId, setExpandedStockMovementId] = useState<string | null>(null);
+  const [stockHistoryRange, setStockHistoryRange] = useState<"today" | "7d" | "all">("all");
+  const [stockHistoryQuery, setStockHistoryQuery] = useState("");
+  const [stockSession, setStockSession] = useState<Record<string, { received: number; damaged: number }>>({});
   const [bizSaved, setBizSaved] = useState(false);
   const [newCatName, setNewCatName] = useState(""); const [newPayName, setNewPayName] = useState(""); const [newPayIcon, setNewPayIcon] = useState("card");
   const [newStaffName, setNewStaffName] = useState(""); const [newStaffPin, setNewStaffPin] = useState(""); const [newStaffRole, setNewStaffRole] = useState<StaffMember["role"]>("bartender");
@@ -1353,6 +1421,118 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
     if (!productForm.name.trim() || productForm.price <= 0) return;
     const newMenu = editingProduct ? menu.map((m) => m.id === editingProduct.id ? productForm : m) : [...menu, { ...productForm, id: uid() }];
     update({ menu: newMenu }); setEditingProduct(null); setProductForm(emptyProduct());
+  }
+
+  function openReceiveStockSession() {
+    const sessionRows: Record<string, { received: number; damaged: number }> = {};
+    menu.forEach((item) => {
+      if (item.stock !== -1) {
+        sessionRows[item.id] = { received: 0, damaged: 0 };
+      }
+    });
+    setStockSession(sessionRows);
+    setShowReceiveStock(true);
+  }
+
+  function applyReceiveStockSession() {
+    const changedLines: StockMovementLine[] = [];
+    const nextMenu = menu.map((item) => {
+      if (item.stock === -1) return item;
+      const row = stockSession[item.id];
+      if (!row) return item;
+      const received = Number.isFinite(row.received) ? Math.max(0, row.received) : 0;
+      const damaged = Number.isFinite(row.damaged) ? Math.max(0, row.damaged) : 0;
+      const net = received - damaged;
+      if (net === 0) return item;
+      const nextStock = Math.max(item.stock + net, 0);
+      changedLines.push({
+        itemId: item.id,
+        itemName: item.name,
+        previousStock: item.stock,
+        received,
+        damaged,
+        net,
+        nextStock,
+      });
+      return { ...item, stock: nextStock };
+    });
+
+    if (changedLines.length === 0) return;
+
+    const movementRecord: StockMovementRecord = {
+      id: uid(),
+      timestamp: new Date().toISOString(),
+      staffId: currentStaffId,
+      staffName: currentStaff?.name ?? "Unknown",
+      lines: changedLines,
+      totals: {
+        received: stockSessionTotals.received,
+        damaged: stockSessionTotals.damaged,
+        net: stockSessionNet,
+      },
+    };
+
+    update({
+      menu: nextMenu,
+      config: {
+        ...config,
+        stockMovements: [movementRecord, ...(config.stockMovements ?? [])].slice(0, 50),
+      },
+    });
+    setShowReceiveStock(false);
+    setStockSession({});
+  }
+
+  function exportStockSessionCsv() {
+    const rows = menu
+      .filter((item) => item.stock !== -1)
+      .map((item) => {
+        const row = stockSession[item.id] ?? { received: 0, damaged: 0 };
+        const received = Number.isFinite(row.received) ? Math.max(0, row.received) : 0;
+        const damaged = Number.isFinite(row.damaged) ? Math.max(0, row.damaged) : 0;
+        const net = received - damaged;
+        if (net === 0) return null;
+        return {
+          product: item.name,
+          currentStock: item.stock,
+          received,
+          damaged,
+          net,
+          nextStock: Math.max(item.stock + net, 0),
+        };
+      })
+      .filter((row): row is { product: string; currentStock: number; received: number; damaged: number; net: number; nextStock: number } => row !== null);
+
+    if (rows.length === 0) return;
+
+    const escapeCsvValue = (value: string | number) => {
+      const str = String(value);
+      if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
+      return str;
+    };
+
+    const lines = [
+      ["Date", new Date().toISOString()],
+      ["Staff", currentStaff?.name ?? "Unknown"],
+      ["Total Received", stockSessionTotals.received],
+      ["Total Damaged", stockSessionTotals.damaged],
+      ["Net", stockSessionNet],
+      [""],
+      ["Product", "Current Stock", "Received", "Damaged", "Net", "Next Stock"],
+      ...rows.map((row) => [row.product, row.currentStock, row.received, row.damaged, row.net, row.nextStock]),
+    ]
+      .map((line) => line.map((cell) => escapeCsvValue(cell as string | number)).join(","))
+      .join("\n");
+
+    const blob = new Blob([lines], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `stock-session-${dateKey(new Date())}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   function handleLogoUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1477,6 +1657,38 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   };
 
   const allowedNavItems = navItems.filter((item) => sectionAllowed[item.id]);
+  const stockSessionTotals = menu
+    .filter((item) => item.stock !== -1)
+    .reduce(
+      (totals, item) => {
+        const row = stockSession[item.id] ?? { received: 0, damaged: 0 };
+        return {
+          received: totals.received + (Number.isFinite(row.received) ? row.received : 0),
+          damaged: totals.damaged + (Number.isFinite(row.damaged) ? row.damaged : 0),
+        };
+      },
+      { received: 0, damaged: 0 },
+    );
+  const stockSessionNet = stockSessionTotals.received - stockSessionTotals.damaged;
+  const hasStockSessionChanges = stockSessionTotals.received > 0 || stockSessionTotals.damaged > 0;
+  const stockMovements = config.stockMovements ?? [];
+  const nowTs = Date.now();
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const todayTs = startOfToday.getTime();
+  const sevenDaysAgoTs = nowTs - (7 * 24 * 60 * 60 * 1000);
+  const historyQuery = stockHistoryQuery.trim().toLowerCase();
+  const filteredStockMovements = stockMovements.filter((entry) => {
+    const entryTs = new Date(entry.timestamp).getTime();
+    if (Number.isNaN(entryTs)) return stockHistoryRange === "all";
+    if (stockHistoryRange === "today") return entryTs >= todayTs;
+    if (stockHistoryRange === "7d") return entryTs >= sevenDaysAgoTs;
+    return true;
+  }).filter((entry) => {
+    if (!historyQuery) return true;
+    if (entry.staffName.toLowerCase().includes(historyQuery)) return true;
+    return entry.lines.some((line) => line.itemName.toLowerCase().includes(historyQuery));
+  });
 
   useEffect(() => {
     if (!sectionAllowed[section]) {
@@ -1530,7 +1742,185 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
 
           {section === "products" && (
             <div className="max-w-4xl">
-              <div className="flex items-center justify-between mb-4"><h2 className="text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{editingProduct ? "Edit Product" : "Products"}</h2>{!editingProduct && <button onClick={() => { setProductForm(emptyProduct()); setEditingProduct(null); }} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90"><Plus size={14} /> Add</button>}</div>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{editingProduct ? "Edit Product" : "Products"}</h2>
+                {!editingProduct && (
+                  <div className="flex items-center gap-2">
+                    <button onClick={openReceiveStockSession} className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/10 text-primary px-4 py-2 text-sm font-semibold hover:bg-primary/15">
+                      <Package size={14} /> Receive Stock
+                    </button>
+                    <button onClick={() => { setProductForm(emptyProduct()); setEditingProduct(null); }} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90"><Plus size={14} /> Add</button>
+                  </div>
+                )}
+              </div>
+
+              {showReceiveStock && !editingProduct && (
+                <div className="rounded-xl border border-primary/25 bg-primary/5 p-5 mb-5">
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                      <p className="text-sm font-bold text-primary">Receive Stock Session</p>
+                      <p className="text-xs text-muted-foreground">Enter received and damaged quantities. Net stock change is received minus damaged.</p>
+                    </div>
+                    <button onClick={() => { setShowReceiveStock(false); setStockSession({}); }} className="rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground">Close</button>
+                  </div>
+
+                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                    {menu.filter((item) => item.stock !== -1).map((item) => {
+                      const row = stockSession[item.id] ?? { received: 0, damaged: 0 };
+                      const net = row.received - row.damaged;
+                      return (
+                        <div key={item.id} className="grid grid-cols-[1fr_90px_90px_70px] gap-2 items-center rounded-lg border border-border bg-card/30 px-3 py-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium truncate">{item.name}</p>
+                            <p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Current: {item.stock}</p>
+                          </div>
+                          <input
+                            type="number"
+                            min="0"
+                            value={row.received || ""}
+                            onChange={(e) => {
+                              const received = Math.max(0, parseInt(e.target.value || "0", 10) || 0);
+                              setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), received } }));
+                            }}
+                            placeholder="Received"
+                            className="rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            value={row.damaged || ""}
+                            onChange={(e) => {
+                              const damaged = Math.max(0, parseInt(e.target.value || "0", 10) || 0);
+                              setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), damaged } }));
+                            }}
+                            placeholder="Damaged"
+                            className="rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                          />
+                          <span className={`text-xs text-right ${net > 0 ? "text-green-400" : net < 0 ? "text-red-400" : "text-muted-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>
+                            {net > 0 ? `+${net}` : net}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-4 rounded-lg border border-border bg-card/30 px-3 py-2">
+                    <div className="flex items-center justify-between text-xs" style={{ fontFamily: "'DM Mono', monospace" }}>
+                      <span className="text-green-400">Received: +{stockSessionTotals.received}</span>
+                      <span className="text-red-400">Damaged: -{stockSessionTotals.damaged}</span>
+                      <span className={stockSessionNet > 0 ? "text-green-400" : stockSessionNet < 0 ? "text-red-400" : "text-muted-foreground"}>
+                        Net: {stockSessionNet > 0 ? `+${stockSessionNet}` : stockSessionNet}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 mt-4">
+                    <button
+                      onClick={exportStockSessionCsv}
+                      disabled={!hasStockSessionChanges}
+                      className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Export CSV
+                    </button>
+                    <button onClick={() => { setShowReceiveStock(false); setStockSession({}); }} className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
+                    <button
+                      onClick={applyReceiveStockSession}
+                      disabled={!hasStockSessionChanges}
+                      className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Apply Session
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!showReceiveStock && !editingProduct && (
+                <div className="rounded-xl border border-border bg-card/30 p-4 mb-5">
+                  <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+                    <p className="text-xs text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Recent Stock Sessions</p>
+                    <div className="flex items-center gap-1.5">
+                      <button onClick={() => setStockHistoryRange("today")} className={`text-[10px] rounded px-2 py-1 border ${stockHistoryRange === "today" ? "text-primary border-primary/40 bg-primary/10" : "text-muted-foreground border-border hover:text-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>Today</button>
+                      <button onClick={() => setStockHistoryRange("7d")} className={`text-[10px] rounded px-2 py-1 border ${stockHistoryRange === "7d" ? "text-primary border-primary/40 bg-primary/10" : "text-muted-foreground border-border hover:text-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>7 Days</button>
+                      <button onClick={() => setStockHistoryRange("all")} className={`text-[10px] rounded px-2 py-1 border ${stockHistoryRange === "all" ? "text-primary border-primary/40 bg-primary/10" : "text-muted-foreground border-border hover:text-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>All</button>
+                    </div>
+                    <span className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{filteredStockMovements.length} shown · {stockMovements.length} total</span>
+                  </div>
+                  <div className="mb-3 flex items-center gap-2">
+                    <input
+                      value={stockHistoryQuery}
+                      onChange={(e) => setStockHistoryQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") {
+                          setStockHistoryQuery("");
+                        }
+                      }}
+                      placeholder="Search by staff or product"
+                      className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                    />
+                    <button
+                      onClick={() => setStockHistoryQuery("")}
+                      disabled={!stockHistoryQuery.trim()}
+                      className="rounded-lg border border-border px-3 py-2 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ fontFamily: "'DM Mono', monospace" }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  {filteredStockMovements.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No stock sessions yet.</p>
+                  ) : (
+                    <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+                      {filteredStockMovements.slice(0, 8).map((entry) => {
+                        const expanded = expandedStockMovementId === entry.id;
+                        const stamp = new Date(entry.timestamp);
+                        const safeStamp = Number.isNaN(stamp.getTime()) ? new Date() : stamp;
+                        return (
+                          <div key={entry.id} className="rounded-lg border border-border bg-card/40 px-3 py-2">
+                            <div className="flex items-center justify-between gap-3 mb-1">
+                              <p className="text-xs font-semibold truncate">{entry.staffName}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmtDate(safeStamp)} {fmtTime(safeStamp)}</p>
+                                <button
+                                  onClick={() => setExpandedStockMovementId(expanded ? null : entry.id)}
+                                  className="text-[10px] text-muted-foreground hover:text-foreground border border-border rounded px-1.5 py-0.5 flex items-center gap-1"
+                                  style={{ fontFamily: "'DM Mono', monospace" }}
+                                >
+                                  {expanded ? "Hide" : "View"}
+                                  <ChevronDown size={10} className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between text-[10px]" style={{ fontFamily: "'DM Mono', monospace" }}>
+                              <span className="text-green-400">+{entry.totals.received}</span>
+                              <span className="text-red-400">-{entry.totals.damaged}</span>
+                              <span className={entry.totals.net > 0 ? "text-green-400" : entry.totals.net < 0 ? "text-red-400" : "text-muted-foreground"}>{entry.totals.net > 0 ? `+${entry.totals.net}` : entry.totals.net}</span>
+                              <span className="text-muted-foreground">{entry.lines.length} items</span>
+                            </div>
+                            {expanded && (
+                              <div className="mt-2 border-t border-border/60 pt-2 space-y-1">
+                                <div className="grid grid-cols-[1fr_50px_50px_45px_55px_55px] gap-1 text-[9px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>
+                                  <span>Product</span><span className="text-right">Before</span><span className="text-right">In</span><span className="text-right">Dmg</span><span className="text-right">Net</span><span className="text-right">After</span>
+                                </div>
+                                {entry.lines.map((line) => (
+                                  <div key={`${entry.id}-${line.itemId}`} className="grid grid-cols-[1fr_50px_50px_45px_55px_55px] gap-1 text-[10px]" style={{ fontFamily: "'DM Mono', monospace" }}>
+                                    <span className="truncate text-foreground">{line.itemName}</span>
+                                    <span className="text-muted-foreground text-right">{line.previousStock}</span>
+                                    <span className="text-green-400 text-right">+{line.received}</span>
+                                    <span className="text-red-400 text-right">-{line.damaged}</span>
+                                    <span className={`text-right ${line.net > 0 ? "text-green-400" : line.net < 0 ? "text-red-400" : "text-muted-foreground"}`}>{line.net > 0 ? `+${line.net}` : line.net}</span>
+                                    <span className="text-foreground text-right">{line.nextStock}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="rounded-xl border border-border bg-card/40 p-5 mb-5">
                 <p className="text-xs font-semibold text-muted-foreground mb-4 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>{editingProduct ? `Editing: ${editingProduct.name}` : "New Product"}</p>
                 <div className="grid grid-cols-2 gap-3">
