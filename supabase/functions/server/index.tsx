@@ -260,12 +260,67 @@ app.post("/server/tenant/:email/sale", async (c) => {
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const sale = await c.req.json();
   const supabase = db();
-  const { error } = await supabase.from("sales").insert({
+
+  const baseInsert = {
     id: crypto.randomUUID(),
     tenant_email: email,
     sale,
-  });
-  if (error) return c.json({ error: error.message }, 400);
+  };
+
+  const { error: baseError } = await supabase.from("sales").insert(baseInsert);
+
+  if (baseError) {
+    const msg = String(baseError.message ?? "").toLowerCase();
+    const isLegacyNotNull = msg.includes("violates not-null constraint") || msg.includes("null value in column");
+
+    if (!isLegacyNotNull) {
+      return c.json({ error: baseError.message }, 400);
+    }
+
+    // Legacy compatibility path: older sales schemas may still enforce NOT NULL on denormalized columns.
+    const legacyInsert: Record<string, unknown> = {
+      ...baseInsert,
+      tab_name: sale?.tabName ?? "Walk-in",
+      items: sale?.items ?? [],
+      subtotal: Number(sale?.subtotal ?? 0),
+      tax: Number(sale?.tax ?? 0),
+      total: Number(sale?.total ?? 0),
+      total_converted: Number(sale?.totalConverted ?? sale?.total ?? 0),
+      payment_method: sale?.paymentMethod ?? "Unknown",
+      currency_code: sale?.currencyCode ?? "ZAR",
+      currency_symbol: sale?.currencySymbol ?? "R",
+      staff_id: sale?.staffId ?? null,
+      customer_id: sale?.customerId ?? null,
+      prepaid: sale?.prepaid ?? null,
+      change_amount: sale?.change ?? null,
+      timestamp: sale?.timestamp ?? new Date().toISOString(),
+      saved_at: new Date().toISOString(),
+    };
+
+    let legacyErrorMessage = "";
+    let legacySaved = false;
+
+    for (let i = 0; i < 16; i++) {
+      const { error: legacyError } = await supabase.from("sales").insert(legacyInsert);
+      if (!legacyError) {
+        legacySaved = true;
+        break;
+      }
+
+      legacyErrorMessage = String(legacyError.message ?? "Unknown legacy insert error");
+      const missingCol = /Could not find the '([^']+)' column/.exec(legacyErrorMessage);
+      if (missingCol?.[1]) {
+        delete legacyInsert[missingCol[1]];
+        continue;
+      }
+
+      break;
+    }
+
+    if (!legacySaved) {
+      return c.json({ error: `Sale save failed. ${baseError.message}. Legacy retry: ${legacyErrorMessage}` }, 400);
+    }
+  }
 
   // Keep only the latest 500 sales per tenant.
   const { data: toTrim, error: trimReadError } = await supabase

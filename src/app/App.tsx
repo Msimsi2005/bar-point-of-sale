@@ -25,11 +25,53 @@ type AdminSection =
   | "products" | "categories" | "payment-methods" | "currencies"
   | "vat" | "business" | "staff" | "customers" | "sales" | "system";
 
-interface StaffMember { id: string; name: string; pin: string; role: "owner" | "manager" | "bartender"; }
+type StaffPermissionKey =
+  | "adminAccess"
+  | "editProducts"
+  | "editCategories"
+  | "editPayments"
+  | "editCurrencies"
+  | "editVat"
+  | "editBusiness"
+  | "manageStaff"
+  | "manageCustomers"
+  | "viewSales"
+  | "manageSystem"
+  | "openTabs"
+  | "editOrders"
+  | "chargeTabs"
+  | "useClientDisplay";
+
+interface StaffPermissions {
+  adminAccess: boolean;
+  editProducts: boolean;
+  editCategories: boolean;
+  editPayments: boolean;
+  editCurrencies: boolean;
+  editVat: boolean;
+  editBusiness: boolean;
+  manageStaff: boolean;
+  manageCustomers: boolean;
+  viewSales: boolean;
+  manageSystem: boolean;
+  openTabs: boolean;
+  editOrders: boolean;
+  chargeTabs: boolean;
+  useClientDisplay: boolean;
+}
+
+interface StaffMember { id: string; name: string; pin: string; role: "owner" | "manager" | "bartender"; permissions: StaffPermissions; }
 interface Customer { id: string; name: string; email: string; phone: string; totalSpent: number; visits: number; notes: string; }
 interface CategoryConfig { name: string; enabled: boolean; }
 interface Currency { code: string; symbol: string; name: string; rate: number; enabled: boolean; }
 interface PaymentMethod { id: string; name: string; icon: string; enabled: boolean; custom?: boolean; }
+interface HardwareDevice {
+  id: string;
+  name: string;
+  connection: "usb" | "network" | "bluetooth";
+  target: string;
+  enabled: boolean;
+}
 
 interface PersistedPosTab {
   id: string;
@@ -52,6 +94,10 @@ interface TenantConfig {
   categories: CategoryConfig[];
   vatEnabled: boolean;
   vatRate: number;
+  printers: HardwareDevice[];
+  scanners: HardwareDevice[];
+  defaultPrinterId?: string;
+  defaultScannerId?: string;
   posState?: PersistedPosState;
 }
 
@@ -136,6 +182,90 @@ function asBool(value: unknown, fallback = false) {
   return fallback;
 }
 
+function defaultPermissionsForRole(role: StaffMember["role"]): StaffPermissions {
+  if (role === "owner") {
+    return {
+      adminAccess: true,
+      editProducts: true,
+      editCategories: true,
+      editPayments: true,
+      editCurrencies: true,
+      editVat: true,
+      editBusiness: true,
+      manageStaff: true,
+      manageCustomers: true,
+      viewSales: true,
+      manageSystem: true,
+      openTabs: true,
+      editOrders: true,
+      chargeTabs: true,
+      useClientDisplay: true,
+    };
+  }
+
+  if (role === "manager") {
+    return {
+      adminAccess: false,
+      editProducts: true,
+      editCategories: true,
+      editPayments: false,
+      editCurrencies: false,
+      editVat: false,
+      editBusiness: false,
+      manageStaff: false,
+      manageCustomers: true,
+      viewSales: true,
+      manageSystem: false,
+      openTabs: true,
+      editOrders: true,
+      chargeTabs: true,
+      useClientDisplay: true,
+    };
+  }
+
+  return {
+    adminAccess: false,
+    editProducts: false,
+    editCategories: false,
+    editPayments: false,
+    editCurrencies: false,
+    editVat: false,
+    editBusiness: false,
+    manageStaff: false,
+    manageCustomers: false,
+    viewSales: false,
+    manageSystem: false,
+    openTabs: true,
+    editOrders: true,
+    chargeTabs: true,
+    useClientDisplay: true,
+  };
+}
+
+function normalizePermissions(raw: unknown, role: StaffMember["role"]): StaffPermissions {
+  const defaults = defaultPermissionsForRole(role);
+  if (!raw || typeof raw !== "object") return defaults;
+  const permissions = raw as Partial<StaffPermissions>;
+
+  return {
+    adminAccess: asBool(permissions.adminAccess, defaults.adminAccess),
+    editProducts: asBool(permissions.editProducts, defaults.editProducts),
+    editCategories: asBool(permissions.editCategories, defaults.editCategories),
+    editPayments: asBool(permissions.editPayments, defaults.editPayments),
+    editCurrencies: asBool(permissions.editCurrencies, defaults.editCurrencies),
+    editVat: asBool(permissions.editVat, defaults.editVat),
+    editBusiness: asBool(permissions.editBusiness, defaults.editBusiness),
+    manageStaff: asBool(permissions.manageStaff, defaults.manageStaff),
+    manageCustomers: asBool(permissions.manageCustomers, defaults.manageCustomers),
+    viewSales: asBool(permissions.viewSales, defaults.viewSales),
+    manageSystem: asBool(permissions.manageSystem, defaults.manageSystem),
+    openTabs: asBool(permissions.openTabs, defaults.openTabs),
+    editOrders: asBool(permissions.editOrders, defaults.editOrders),
+    chargeTabs: asBool(permissions.chargeTabs, defaults.chargeTabs),
+    useClientDisplay: asBool(permissions.useClientDisplay, defaults.useClientDisplay),
+  };
+}
+
 function serializeTabs(tabs: Tab[]): PersistedPosTab[] {
   return tabs.map((tab) => ({
     id: tab.id,
@@ -178,6 +308,8 @@ function rowToTenant(row: any): Tenant {
     currencies: Array.isArray(rawConfig.currencies) ? rawConfig.currencies : makeConfig().currencies,
     paymentMethods: Array.isArray(rawConfig.paymentMethods) ? rawConfig.paymentMethods : makeConfig().paymentMethods,
     categories: Array.isArray(rawConfig.categories) ? rawConfig.categories : makeConfig().categories,
+    printers: Array.isArray(rawConfig.printers) ? rawConfig.printers : makeConfig().printers,
+    scanners: Array.isArray(rawConfig.scanners) ? rawConfig.scanners : makeConfig().scanners,
   });
 
   const normalizedConfig: TenantConfig = {
@@ -195,6 +327,22 @@ function rowToTenant(row: any): Tenant {
       ...cat,
       enabled: asBool(cat.enabled, true),
     })),
+    printers: (mergedConfig.printers ?? []).map((d) => ({
+      id: String(d.id ?? uid()),
+      name: String(d.name ?? "Printer"),
+      connection: (d.connection === "network" || d.connection === "bluetooth" ? d.connection : "usb") as HardwareDevice["connection"],
+      target: String(d.target ?? ""),
+      enabled: asBool(d.enabled, true),
+    })),
+    scanners: (mergedConfig.scanners ?? []).map((d) => ({
+      id: String(d.id ?? uid()),
+      name: String(d.name ?? "Scanner"),
+      connection: (d.connection === "network" || d.connection === "bluetooth" ? d.connection : "usb") as HardwareDevice["connection"],
+      target: String(d.target ?? ""),
+      enabled: asBool(d.enabled, true),
+    })),
+    defaultPrinterId: mergedConfig.defaultPrinterId,
+    defaultScannerId: mergedConfig.defaultScannerId,
   };
 
   return {
@@ -207,7 +355,16 @@ function rowToTenant(row: any): Tenant {
     menu: (row.menu ?? []).map((m: any) => ({ ...m })),
     sales: (row.sales ?? []).map((s: any) => ({ ...s, timestamp: new Date(s.timestamp ?? s.savedAt ?? Date.now()) })),
     customers: (row.customers ?? []).map((c: any) => ({ id: c.id, name: c.name, email: c.email ?? "", phone: c.phone ?? "", totalSpent: c.total_spent ?? c.totalSpent ?? 0, visits: c.visits ?? 0, notes: c.notes ?? "" })),
-    staff: (row.staff ?? []).map((s: any) => ({ id: s.id, name: s.name, pin: s.pin, role: s.role })),
+    staff: (row.staff ?? []).map((s: any) => {
+      const role = (s.role === "owner" || s.role === "manager" || s.role === "bartender") ? s.role : "bartender";
+      return {
+        id: s.id,
+        name: s.name,
+        pin: s.pin,
+        role,
+        permissions: normalizePermissions(s.permissions, role),
+      };
+    }),
     createdAt: new Date(row.createdAt ?? row.created_at ?? Date.now()),
   };
 }
@@ -242,6 +399,10 @@ function makeConfig(overrides: Partial<TenantConfig> = {}): TenantConfig {
       { name: "Spirits", enabled: true }, { name: "Wine", enabled: true },
       { name: "N/A", enabled: true }, { name: "Food", enabled: true },
     ],
+    printers: [],
+    scanners: [],
+    defaultPrinterId: undefined,
+    defaultScannerId: undefined,
     ...overrides,
   };
 }
@@ -1036,16 +1197,24 @@ function SalesSection({ sales }: { sales: SaleRecord[] }) {
 // ADMIN PANEL
 // ─────────────────────────────────────────────────────────────────────────────
 
-function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTenantChange: (t: Tenant) => void; onBack: () => void; }) {
+function AdminPanel({ tenant, currentStaffId, onTenantChange, onBack }: { tenant: Tenant; currentStaffId: string; onTenantChange: (t: Tenant) => void; onBack: () => void; }) {
   const [section, setSection] = useState<AdminSection>("products");
   const [editingProduct, setEditingProduct] = useState<MenuItem | null>(null);
   const [bizSaved, setBizSaved] = useState(false);
   const [newCatName, setNewCatName] = useState(""); const [newPayName, setNewPayName] = useState(""); const [newPayIcon, setNewPayIcon] = useState("card");
   const [newStaffName, setNewStaffName] = useState(""); const [newStaffPin, setNewStaffPin] = useState(""); const [newStaffRole, setNewStaffRole] = useState<StaffMember["role"]>("bartender");
   const [newCustName, setNewCustName] = useState(""); const [newCustEmail, setNewCustEmail] = useState(""); const [newCustPhone, setNewCustPhone] = useState(""); const [editingCust, setEditingCust] = useState<Customer | null>(null);
+  const [newPrinterName, setNewPrinterName] = useState("");
+  const [newPrinterConnection, setNewPrinterConnection] = useState<HardwareDevice["connection"]>("usb");
+  const [newPrinterTarget, setNewPrinterTarget] = useState("");
+  const [newScannerName, setNewScannerName] = useState("");
+  const [newScannerConnection, setNewScannerConnection] = useState<HardwareDevice["connection"]>("usb");
+  const [newScannerTarget, setNewScannerTarget] = useState("");
   const logoRef = useRef<HTMLInputElement>(null);
 
   const { config, businessInfo, menu } = tenant;
+  const currentStaff = tenant.staff.find((s) => s.id === currentStaffId) ?? null;
+  const currentPermissions = currentStaff?.permissions ?? defaultPermissionsForRole(currentStaff?.role ?? "bartender");
   const emptyProduct = (): MenuItem => ({ id: uid(), name: "", category: config.categories.find((c) => c.enabled)?.name ?? "Cocktails", price: 0, description: "", stock: -1 });
   const [productForm, setProductForm] = useState<MenuItem>(emptyProduct());
   const [bizForm, setBizForm] = useState<BusinessInfo>({ ...businessInfo });
@@ -1088,7 +1257,26 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
     setTimeout(() => setBizSaved(false), 2000);
   }
 
+  const printers = config.printers ?? [];
+  const scanners = config.scanners ?? [];
   const enabledCats = config.categories.filter((c) => c.enabled).map((c) => c.name);
+  const permissionLabels: Array<{ key: StaffPermissionKey; label: string }> = [
+    { key: "adminAccess", label: "Admin Access" },
+    { key: "editProducts", label: "Edit Products" },
+    { key: "editCategories", label: "Edit Categories" },
+    { key: "editPayments", label: "Edit Payments" },
+    { key: "editCurrencies", label: "Edit Currencies" },
+    { key: "editVat", label: "Edit VAT" },
+    { key: "editBusiness", label: "Edit Business Info" },
+    { key: "manageStaff", label: "Manage Staff" },
+    { key: "manageCustomers", label: "Manage Customers" },
+    { key: "viewSales", label: "View Sales" },
+    { key: "manageSystem", label: "System Settings" },
+    { key: "openTabs", label: "Open/Close Tabs" },
+    { key: "editOrders", label: "Add/Edit Orders" },
+    { key: "chargeTabs", label: "Charge Tabs" },
+    { key: "useClientDisplay", label: "Client Display" },
+  ];
 
   const navItems: { id: AdminSection; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
     { id: "products", label: "Products", icon: Package }, { id: "categories", label: "Categories", icon: Tag },
@@ -1097,6 +1285,47 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
     { id: "staff", label: "Staff", icon: Shield }, { id: "customers", label: "Customers", icon: UserCheck },
     { id: "sales", label: "Sales", icon: BarChart2 }, { id: "system", label: "System", icon: Info },
   ];
+
+  const sectionAllowed: Record<AdminSection, boolean> = {
+    products: currentPermissions.editProducts,
+    categories: currentPermissions.editCategories,
+    "payment-methods": currentPermissions.editPayments,
+    currencies: currentPermissions.editCurrencies,
+    vat: currentPermissions.editVat,
+    business: currentPermissions.editBusiness,
+    staff: currentPermissions.manageStaff,
+    customers: currentPermissions.manageCustomers,
+    sales: currentPermissions.viewSales,
+    system: currentPermissions.manageSystem,
+  };
+
+  const allowedNavItems = navItems.filter((item) => sectionAllowed[item.id]);
+
+  useEffect(() => {
+    if (!sectionAllowed[section]) {
+      setSection(allowedNavItems[0]?.id ?? "system");
+    }
+  }, [section, allowedNavItems, sectionAllowed]);
+
+  if (!currentPermissions.adminAccess) {
+    return (
+      <div className="h-screen w-screen flex flex-col bg-background text-foreground" style={{ fontFamily: "'Barlow', sans-serif" }}>
+        <header className="flex items-center justify-between px-6 py-3 border-b border-border bg-card/60 shrink-0">
+          <div className="flex items-center gap-3">
+            <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"><ArrowLeft size={15} /> POS</button>
+          </div>
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded border text-muted-foreground border-border" style={{ fontFamily: "'DM Mono', monospace" }}>ACCESS CONTROL</span>
+        </header>
+        <div className="flex-1 flex items-center justify-center p-6">
+          <div className="max-w-md rounded-xl border border-border bg-card/30 p-6 text-center">
+            <Shield size={22} className="text-primary mx-auto mb-3" />
+            <h2 className="text-lg font-bold mb-2" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Admin Access Restricted</h2>
+            <p className="text-sm text-muted-foreground">Only staff with admin permission can open company settings.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen w-screen flex flex-col bg-background text-foreground" style={{ fontFamily: "'Barlow', sans-serif" }}>
@@ -1110,7 +1339,7 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
       </header>
       <div className="flex flex-1 overflow-hidden">
         <aside className="w-44 shrink-0 border-r border-border bg-card/30 flex flex-col py-3 gap-0.5 px-2 overflow-y-auto">
-          {navItems.map(({ id, label, icon: Icon }) => (
+          {allowedNavItems.map(({ id, label, icon: Icon }) => (
             <button key={id} onClick={() => { setSection(id); setEditingProduct(null); setProductForm(emptyProduct()); }} className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-all ${section === id ? "bg-primary/15 text-primary border border-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-white/5"}`}><Icon size={14} /> {label}</button>
           ))}
         </aside>
@@ -1268,13 +1497,13 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
             <div className="max-w-lg">
               <h2 className="text-xl font-bold mb-1" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Business Users</h2>
               <p className="text-sm text-muted-foreground mb-5">Company admins manage the users who can access this business.</p>
-              <div className="space-y-2 mb-5">{tenant.staff.map((s) => <div key={s.id} className="flex items-center gap-3 rounded-xl border border-border bg-card/30 px-4 py-3"><div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{s.name[0]}</span></div><div className="flex-1"><p className="text-sm font-semibold">{s.name}</p><p className="text-xs text-muted-foreground capitalize">{s.role} · PIN: ••••</p></div>{s.role!=="owner"&&<button onClick={()=>update({staff:tenant.staff.filter((st)=>st.id!==s.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>}</div>)}</div>
+              <div className="space-y-2 mb-5">{tenant.staff.map((s) => { const staffPermissions = s.permissions ?? defaultPermissionsForRole(s.role); return <div key={s.id} className="rounded-xl border border-border bg-card/30 px-4 py-3"><div className="flex items-center gap-3"><div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{s.name[0]}</span></div><div className="flex-1"><p className="text-sm font-semibold">{s.name}</p><p className="text-xs text-muted-foreground capitalize">{s.role} · PIN: ••••</p></div>{s.role!=="owner"&&<button onClick={()=>update({staff:tenant.staff.filter((st)=>st.id!==s.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>}</div><div className="mt-3 grid grid-cols-2 gap-2">{permissionLabels.map(({ key, label }) => (<button key={key} disabled={s.role === "owner"} onClick={() => { if (s.role === "owner") return; update({ staff: tenant.staff.map((st) => { if (st.id !== s.id) return st; const nextPermissions = st.permissions ?? defaultPermissionsForRole(st.role); return { ...st, permissions: { ...nextPermissions, [key]: !nextPermissions[key] } }; }) }); }} className={`flex items-center justify-between rounded-lg border px-2 py-1.5 text-xs ${staffPermissions[key] ? "border-primary/30 bg-primary/10 text-primary" : "border-border text-muted-foreground"} ${s.role === "owner" ? "opacity-60 cursor-not-allowed" : "hover:bg-white/5"}`}><span>{label}</span><span className={`w-8 h-4 rounded-full relative ${staffPermissions[key] ? "bg-primary" : "bg-white/10"}`}><span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${staffPermissions[key] ? "left-[18px]" : "left-0.5"}`} /></span></button>))}</div></div>; })}</div>
               <div className="rounded-xl border border-dashed border-border p-4">
                 <p className="text-xs text-muted-foreground mb-3 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Add User</p>
                 <div className="space-y-2">
                   <input value={newStaffName} onChange={(e)=>setNewStaffName(e.target.value)} placeholder="Full name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
                   <div className="flex gap-2"><input value={newStaffPin} onChange={(e)=>setNewStaffPin(e.target.value.replace(/\D/g,"").slice(0,4))} placeholder="4-digit PIN" maxLength={4} className="flex-1 rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none" style={{ fontFamily: "'DM Mono', monospace" }} /><select value={newStaffRole} onChange={(e)=>setNewStaffRole(e.target.value as StaffMember["role"])} className="rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground focus:outline-none"><option value="bartender">Bartender</option><option value="manager">Manager</option></select></div>
-                  <button onClick={()=>{if(!newStaffName.trim()||newStaffPin.length!==4)return;update({staff:[...tenant.staff,{id:uid(),name:newStaffName.trim(),pin:newStaffPin,role:newStaffRole}]});setNewStaffName("");setNewStaffPin("");setNewStaffRole("bartender");}} disabled={!newStaffName.trim()||newStaffPin.length!==4} className="w-full rounded-lg bg-primary/15 border border-primary/25 text-primary py-2 text-sm font-semibold hover:bg-primary/20 disabled:opacity-30">+ Add Business User</button>
+                  <button onClick={()=>{if(!newStaffName.trim()||newStaffPin.length!==4)return;update({staff:[...tenant.staff,{id:uid(),name:newStaffName.trim(),pin:newStaffPin,role:newStaffRole,permissions:defaultPermissionsForRole(newStaffRole)}]});setNewStaffName("");setNewStaffPin("");setNewStaffRole("bartender");}} disabled={!newStaffName.trim()||newStaffPin.length!==4} className="w-full rounded-lg bg-primary/15 border border-primary/25 text-primary py-2 text-sm font-semibold hover:bg-primary/20 disabled:opacity-30">+ Add Business User</button>
                 </div>
               </div>
             </div>
@@ -1306,6 +1535,73 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
           {section === "system" && (
             <div className="max-w-xl">
               <h2 className="text-xl font-bold mb-5" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>System</h2>
+              <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
+                <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Hardware Settings</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 mb-2"><Printer size={13} className="text-primary" /><p className="text-sm font-semibold">Printers</p></div>
+                    <div className="space-y-1.5 mb-3">
+                      {printers.length === 0 && <p className="text-xs text-muted-foreground">No printers assigned yet.</p>}
+                      {printers.map((p) => (
+                        <div key={p.id} className="rounded-lg border border-border bg-white/3 px-3 py-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold truncate">{p.name}</p>
+                              <p className="text-[10px] text-muted-foreground truncate" style={{ fontFamily: "'DM Mono', monospace" }}>{p.connection.toUpperCase()} {p.target ? `• ${p.target}` : ""}</p>
+                            </div>
+                            <button onClick={() => updateConfig({ printers: printers.filter((d) => d.id !== p.id), defaultPrinterId: config.defaultPrinterId === p.id ? undefined : config.defaultPrinterId })} className="p-1 text-muted-foreground hover:text-red-400"><Trash2 size={12} /></button>
+                          </div>
+                          <div className="flex items-center justify-between mt-2">
+                            <button onClick={() => updateConfig({ defaultPrinterId: p.id })} className={`text-[10px] px-2 py-0.5 rounded border ${config.defaultPrinterId === p.id ? "border-primary text-primary" : "border-border text-muted-foreground hover:text-foreground"}`}>Default</button>
+                            <button onClick={() => updateConfig({ printers: printers.map((d) => d.id === p.id ? { ...d, enabled: !d.enabled } : d), defaultPrinterId: p.enabled && config.defaultPrinterId === p.id ? undefined : config.defaultPrinterId })} className={`w-10 h-5 rounded-full relative ${p.enabled ? "bg-primary" : "bg-white/10"}`}><span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${p.enabled ? "left-[20px]" : "left-0.5"}`} /></button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="space-y-1.5">
+                      <input value={newPrinterName} onChange={(e) => setNewPrinterName(e.target.value)} placeholder="Printer name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+                      <div className="flex gap-2">
+                        <select value={newPrinterConnection} onChange={(e) => setNewPrinterConnection(e.target.value as HardwareDevice["connection"])} className="rounded-lg bg-[#1a1510] border border-border px-2 py-2 text-xs text-foreground focus:outline-none">
+                          <option value="usb">USB</option><option value="network">Network</option><option value="bluetooth">Bluetooth</option>
+                        </select>
+                        <input value={newPrinterTarget} onChange={(e) => setNewPrinterTarget(e.target.value)} placeholder="IP / Port / Device" className="flex-1 rounded-lg bg-white/5 border border-border px-3 py-2 text-xs text-foreground focus:outline-none focus:border-primary/50" />
+                      </div>
+                      <button onClick={() => { if (!newPrinterName.trim()) return; const n: HardwareDevice = { id: uid(), name: newPrinterName.trim(), connection: newPrinterConnection, target: newPrinterTarget.trim(), enabled: true }; updateConfig({ printers: [...printers, n], defaultPrinterId: config.defaultPrinterId ?? n.id }); setNewPrinterName(""); setNewPrinterTarget(""); setNewPrinterConnection("usb"); }} className="w-full rounded-lg bg-primary/15 border border-primary/25 text-primary py-2 text-xs font-semibold hover:bg-primary/20">+ Add Printer</button>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 mb-2"><QrCode size={13} className="text-primary" /><p className="text-sm font-semibold">Scanners</p></div>
+                    <div className="space-y-1.5 mb-3">
+                      {scanners.length === 0 && <p className="text-xs text-muted-foreground">No scanners assigned yet.</p>}
+                      {scanners.map((s) => (
+                        <div key={s.id} className="rounded-lg border border-border bg-white/3 px-3 py-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold truncate">{s.name}</p>
+                              <p className="text-[10px] text-muted-foreground truncate" style={{ fontFamily: "'DM Mono', monospace" }}>{s.connection.toUpperCase()} {s.target ? `• ${s.target}` : ""}</p>
+                            </div>
+                            <button onClick={() => updateConfig({ scanners: scanners.filter((d) => d.id !== s.id), defaultScannerId: config.defaultScannerId === s.id ? undefined : config.defaultScannerId })} className="p-1 text-muted-foreground hover:text-red-400"><Trash2 size={12} /></button>
+                          </div>
+                          <div className="flex items-center justify-between mt-2">
+                            <button onClick={() => updateConfig({ defaultScannerId: s.id })} className={`text-[10px] px-2 py-0.5 rounded border ${config.defaultScannerId === s.id ? "border-primary text-primary" : "border-border text-muted-foreground hover:text-foreground"}`}>Default</button>
+                            <button onClick={() => updateConfig({ scanners: scanners.map((d) => d.id === s.id ? { ...d, enabled: !d.enabled } : d), defaultScannerId: s.enabled && config.defaultScannerId === s.id ? undefined : config.defaultScannerId })} className={`w-10 h-5 rounded-full relative ${s.enabled ? "bg-primary" : "bg-white/10"}`}><span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${s.enabled ? "left-[20px]" : "left-0.5"}`} /></button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="space-y-1.5">
+                      <input value={newScannerName} onChange={(e) => setNewScannerName(e.target.value)} placeholder="Scanner name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+                      <div className="flex gap-2">
+                        <select value={newScannerConnection} onChange={(e) => setNewScannerConnection(e.target.value as HardwareDevice["connection"])} className="rounded-lg bg-[#1a1510] border border-border px-2 py-2 text-xs text-foreground focus:outline-none">
+                          <option value="usb">USB</option><option value="network">Network</option><option value="bluetooth">Bluetooth</option>
+                        </select>
+                        <input value={newScannerTarget} onChange={(e) => setNewScannerTarget(e.target.value)} placeholder="IP / Port / Device" className="flex-1 rounded-lg bg-white/5 border border-border px-3 py-2 text-xs text-foreground focus:outline-none focus:border-primary/50" />
+                      </div>
+                      <button onClick={() => { if (!newScannerName.trim()) return; const n: HardwareDevice = { id: uid(), name: newScannerName.trim(), connection: newScannerConnection, target: newScannerTarget.trim(), enabled: true }; updateConfig({ scanners: [...scanners, n], defaultScannerId: config.defaultScannerId ?? n.id }); setNewScannerName(""); setNewScannerTarget(""); setNewScannerConnection("usb"); }} className="w-full rounded-lg bg-primary/15 border border-primary/25 text-primary py-2 text-xs font-semibold hover:bg-primary/20">+ Add Scanner</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
                 <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Management</p>
                 <div className="space-y-2 text-sm text-muted-foreground">
@@ -1433,6 +1729,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
 
   const { config, menu } = tenant;
   const staff = tenant.staff.find((s) => s.id === staffId);
+  const permissions = staff?.permissions ?? defaultPermissionsForRole(staff?.role ?? "bartender");
   const zarSymbol = config.currencies.find((c) => c.code === "ZAR")?.symbol ?? "R";
   const enabledCats = ["All", ...config.categories.filter((c) => c.enabled).map((c) => c.name)];
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
@@ -1442,7 +1739,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   const filtered = activeCategory === "All" ? menu.filter((m) => enabledCats.includes(m.category)) : menu.filter((m) => m.category === activeCategory);
 
   function addToOrder(item: MenuItem) {
-    if (!activeTabId || item.stock === 0) return;
+    if (!permissions.editOrders || !activeTabId || item.stock === 0) return;
     setTabs((prev) => prev.map((tab) => {
       if (tab.id !== activeTabId) return tab;
       const existing = tab.orders.find((o) => o.menuItem.id === item.id);
@@ -1453,16 +1750,19 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   }
 
   function changeQty(tabId: string, itemId: string, delta: number) {
+    if (!permissions.editOrders) return;
     setTabs((prev) => prev.map((tab) => { if (tab.id !== tabId) return tab; return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === itemId ? { ...o, qty: o.qty + delta } : o).filter((o) => o.qty > 0) }; }));
   }
 
   function createTab(name: string, prepaid?: number, customerId?: string) {
+    if (!permissions.openTabs) return;
     _tabSeq++;
     const t: Tab = { id: `t${_tabSeq}`, name, orders: [], opened: new Date(), prepaid, customerId };
     setTabs((p) => [...p, t]); setActiveTabId(t.id); setShowNewTab(false);
   }
 
   function closeTabById(id: string) {
+    if (!permissions.openTabs) return;
     setTabs((p) => p.filter((t) => t.id !== id));
     if (activeTabId === id) setActiveTabId(null);
   }
@@ -1493,15 +1793,15 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
           <div className="hidden md:flex items-center gap-1 text-xs text-muted-foreground border border-border rounded-lg px-3 py-1.5"><Users size={12} /> {tabs.length}</div>
           <div className="hidden sm:flex items-center gap-1 text-xs text-muted-foreground border border-border rounded-lg px-3 py-1.5" style={{ fontFamily: "'DM Mono', monospace" }}><Clock size={12} /> {fmtTime(now)}</div>
           {staff && <div className="hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground border border-border rounded-lg px-3 py-1.5"><User size={12} /> {staff.name.split(" ")[0]}</div>}
-          <button onClick={onClient} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"><Monitor size={12} /></button>
-          <button onClick={onAdmin} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"><Settings size={12} /></button>
+          <button onClick={onClient} disabled={!permissions.useClientDisplay} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Monitor size={12} /></button>
+          <button onClick={onAdmin} disabled={!permissions.adminAccess} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Settings size={12} /></button>
           <button onClick={onLogout} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-red-400 hover:border-red-900/30 transition-colors"><LogOut size={12} /></button>
         </div>
       </header>
       <div className="flex flex-1 overflow-hidden">
         {/* Tabs sidebar */}
         <aside className="w-48 shrink-0 border-r border-border bg-card/30 flex flex-col overflow-hidden">
-          <div className="flex items-center justify-between px-4 pt-4 pb-2"><span className="text-[10px] font-semibold tracking-widest text-muted-foreground uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>Open Tabs</span><button onClick={()=>setShowNewTab(true)} className="rounded-md w-6 h-6 flex items-center justify-center bg-primary/20 text-primary hover:bg-primary/30 transition-colors"><Plus size={13} /></button></div>
+          <div className="flex items-center justify-between px-4 pt-4 pb-2"><span className="text-[10px] font-semibold tracking-widest text-muted-foreground uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>Open Tabs</span><button onClick={()=>setShowNewTab(true)} disabled={!permissions.openTabs} className="rounded-md w-6 h-6 flex items-center justify-center bg-primary/20 text-primary hover:bg-primary/30 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={13} /></button></div>
           <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
             {tabs.map((tab) => { const isActive = tab.id === activeTabId; const s = calcSubtotal(tab.orders); const t = s + calcTax(s, config); const pp = tab.prepaid ?? 0; return (
               <button key={tab.id} onClick={()=>setActiveTabId(tab.id)} className={`w-full text-left rounded-lg px-3 py-2.5 transition-all ${isActive?"bg-primary/15 border border-primary/25":"border border-transparent hover:bg-white/5"}`}>
@@ -1511,7 +1811,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
             ); })}
             {tabs.length === 0 && <p className="text-xs text-muted-foreground text-center py-8 px-2">No open tabs.</p>}
           </div>
-          <div className="px-2 pb-3"><button onClick={()=>setShowNewTab(true)} className="w-full rounded-lg border border-dashed border-primary/25 py-2.5 text-xs text-primary/70 hover:border-primary/40 hover:text-primary transition-colors">+ New Tab</button></div>
+          <div className="px-2 pb-3"><button onClick={()=>setShowNewTab(true)} disabled={!permissions.openTabs} className="w-full rounded-lg border border-dashed border-primary/25 py-2.5 text-xs text-primary/70 hover:border-primary/40 hover:text-primary transition-colors disabled:opacity-30 disabled:cursor-not-allowed">+ New Tab</button></div>
         </aside>
 
         {/* Menu */}
@@ -1526,7 +1826,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                 const oos = item.stock === 0;
                 const oqty = activeTab?.orders.find((o) => o.menuItem.id === item.id)?.qty ?? 0;
                 const atLim = item.stock !== -1 && oqty >= item.stock && item.stock > 0;
-                const dis = !activeTabId || oos;
+                const dis = !activeTabId || oos || !permissions.editOrders;
                 return (
                   <button key={item.id} onClick={()=>!dis&&!atLim&&addToOrder(item)} disabled={dis||atLim}
                     className={`group relative text-left rounded-xl border p-3.5 transition-all active:scale-[0.97] ${oos?"border-red-900/30 bg-red-900/5 opacity-50 cursor-not-allowed":dis||atLim?"border-border/50 bg-card/40 opacity-50 cursor-not-allowed":"border-border bg-card hover:border-primary/30 hover:bg-primary/5 cursor-pointer"}`}>
@@ -1553,7 +1853,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
             <>
               <div className="flex items-center justify-between px-4 pt-4 pb-3 border-b border-border shrink-0">
                 <div><p className="text-[10px] text-muted-foreground tracking-widest uppercase mb-0.5" style={{ fontFamily: "'DM Mono', monospace" }}>{activeTab.prepaid?"Pre-Paid Tab":"Active Tab"}</p><h2 className="text-lg font-bold leading-none" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{activeTab.name}</h2></div>
-                <button onClick={()=>{if(window.confirm(`Close tab for ${activeTab.name}?`))closeTabById(activeTab.id);}} className="p-1.5 text-muted-foreground hover:text-red-400 hover:bg-red-400/10 rounded-md transition-colors"><Trash2 size={14} /></button>
+                <button onClick={()=>{if(window.confirm(`Close tab for ${activeTab.name}?`))closeTabById(activeTab.id);}} disabled={!permissions.openTabs} className="p-1.5 text-muted-foreground hover:text-red-400 hover:bg-red-400/10 rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Trash2 size={14} /></button>
               </div>
               {activeTab.prepaid && activeTab.prepaid > 0 && (
                 <div className={`mx-3 mt-2 rounded-lg px-3 py-2 text-xs flex items-center justify-between ${balance>=0?"bg-green-400/10 border border-green-400/20":"bg-red-400/10 border border-red-400/20"}`}>
@@ -1567,9 +1867,9 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                     <div key={o.menuItem.id} className="flex items-center gap-2 rounded-lg bg-white/3 border border-white/5 px-3 py-2">
                       <div className="flex-1 min-w-0"><p className="text-xs font-medium truncate">{o.menuItem.name}</p><p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{o.menuItem.price.toFixed(2)} ea</p></div>
                       <div className="flex items-center gap-1 shrink-0">
-                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors"><Minus size={9} /></button>
+                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Minus size={9} /></button>
                         <span className="text-xs font-bold w-4 text-center" style={{ fontFamily: "'DM Mono', monospace" }}>{o.qty}</span>
-                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors"><Plus size={9} /></button>
+                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
                       </div>
                       <span className="text-xs font-semibold w-12 text-right shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{(o.menuItem.price*o.qty).toFixed(0)}</span>
                     </div>
@@ -1583,11 +1883,11 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                 </div>
               )}
               <div className="px-3 pb-4 pt-2 shrink-0">
-                <button onClick={()=>setPayingTab(activeTab)} disabled={activeTab.orders.length===0} className="w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm font-bold tracking-widest transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}><CreditCard size={15} /> CHARGE TAB</button>
+                <button onClick={()=>setPayingTab(activeTab)} disabled={activeTab.orders.length===0 || !permissions.chargeTabs} className="w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm font-bold tracking-widest transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}><CreditCard size={15} /> CHARGE TAB</button>
               </div>
             </>
           ) : (
-            <div className="flex-1 flex flex-col items-center justify-center text-center px-5 gap-3"><Receipt size={32} className="text-muted-foreground/20" /><p className="text-xs text-muted-foreground">Select or open a tab.</p><button onClick={()=>setShowNewTab(true)} className="rounded-lg bg-primary/15 border border-primary/25 text-primary text-xs font-semibold px-4 py-2 hover:bg-primary/20 transition-colors">+ Open New Tab</button></div>
+            <div className="flex-1 flex flex-col items-center justify-center text-center px-5 gap-3"><Receipt size={32} className="text-muted-foreground/20" /><p className="text-xs text-muted-foreground">Select or open a tab.</p><button onClick={()=>setShowNewTab(true)} disabled={!permissions.openTabs} className="rounded-lg bg-primary/15 border border-primary/25 text-primary text-xs font-semibold px-4 py-2 hover:bg-primary/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed">+ Open New Tab</button></div>
           )}
         </aside>
       </div>
@@ -1779,11 +2079,17 @@ export default function App() {
     return <LandingPage onVenueLogin={() => setScreen("venue_login")} onSuperAdmin={() => setScreen("superadmin_login")} />;
   }
 
+  const activeStaff = tenant.staff.find((s) => s.id === session.staffId) ?? null;
+  const activePermissions = activeStaff?.permissions ?? defaultPermissionsForRole(activeStaff?.role ?? "bartender");
+
   if (!staffConfirmed) {
     return <StaffSelector tenant={tenant} onSelect={(staffId) => { setSession({ ...session, staffId }); setStaffConfirmed(true); }} onBack={handleVenueLogout} />;
   }
 
-  if (screen === "admin") return <AdminPanel tenant={tenant} onTenantChange={updateTenant} onBack={() => setScreen("pos")} />;
+  if (screen === "admin") {
+    if (!activePermissions.adminAccess) return <POSView tenant={tenant} staffId={session.staffId} onTenantChange={updateTenant} onSalePersisted={handleSalePersisted} onAdmin={() => undefined} onClient={() => setScreen("client")} onLogout={handleVenueLogout} />;
+    return <AdminPanel tenant={tenant} currentStaffId={session.staffId} onTenantChange={updateTenant} onBack={() => setScreen("pos")} />;
+  }
   if (screen === "client") return <ClientDisplay activeTab={null} tenant={tenant} onBack={() => setScreen("pos")} />;
 
   return (
@@ -1792,7 +2098,7 @@ export default function App() {
       staffId={session.staffId}
       onTenantChange={updateTenant}
       onSalePersisted={handleSalePersisted}
-      onAdmin={() => setScreen("admin")}
+      onAdmin={() => { if (activePermissions.adminAccess) setScreen("admin"); }}
       onClient={() => setScreen("client")}
       onLogout={handleVenueLogout}
     />

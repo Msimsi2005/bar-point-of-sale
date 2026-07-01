@@ -65,3 +65,37 @@ where sale is null or saved_at is null;
 
 create index if not exists idx_sales_tenant_email on public.sales(tenant_email);
 create index if not exists idx_sales_tenant_saved_at on public.sales(tenant_email, saved_at desc);
+
+-- 5) Legacy sales schema compatibility:
+-- If older columns still exist and are NOT NULL, drop those NOT NULL constraints
+-- so the current edge function can safely store the full sale in the `sale` jsonb column.
+do $$
+begin
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='tab_name') then
+    execute 'alter table public.sales alter column tab_name drop not null';
+  end if;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='items') then
+    execute 'alter table public.sales alter column items drop not null';
+  end if;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='subtotal') then
+    execute 'alter table public.sales alter column subtotal drop not null';
+  end if;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='tax') then
+    execute 'alter table public.sales alter column tax drop not null';
+  end if;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='total') then
+    execute 'alter table public.sales alter column total drop not null';
+  end if;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='payment_method') then
+    execute 'alter table public.sales alter column payment_method drop not null';
+  end if;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='currency_code') then
+    execute 'alter table public.sales alter column currency_code drop not null';
+  end if;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='currency_symbol') then
+    execute 'alter table public.sales alter column currency_symbol drop not null';
+  end if;
+  if exists (select 1 from information_schema.columns where table_schema='public' and table_name='sales' and column_name='staff_id') then
+    execute 'alter table public.sales alter column staff_id drop not null';
+  end if;
+end $$;
