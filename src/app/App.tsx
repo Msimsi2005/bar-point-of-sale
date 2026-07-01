@@ -1531,7 +1531,13 @@ export default function App() {
 
       const reachableStatus = res.ok || [400, 401, 403, 422].includes(res.status);
       if (!reachableStatus) {
-        throw new Error(`Unexpected API response (${res.status}).`);
+        setBackendStatus("down");
+        if (res.status === 404) {
+          setBackendMessage("Supabase edge function was not found (404). Deploy the 'server' function and confirm VITE_API_BASE points to /functions/v1/server.");
+        } else {
+          setBackendMessage(`Supabase API returned unexpected status (${res.status}). Verify function deployment and environment settings.`);
+        }
+        return;
       }
 
       setBackendStatus("ready");
