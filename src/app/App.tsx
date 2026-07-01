@@ -985,12 +985,60 @@ function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect:
 
 function ReceiptModal({ sale, businessInfo, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; onClose: () => void; }) {
   const printRef = useRef<HTMLDivElement>(null);
+  const [printError, setPrintError] = useState("");
+
   function handlePrint() {
+    setPrintError("");
     const w = window.open("", "_blank", "width=420,height=640");
-    if (!w) return;
+    if (!w) {
+      setPrintError("Popup blocked. Allow popups for this site and try again.");
+      return;
+    }
+
     const logo = businessInfo.logo ? `<img src="${businessInfo.logo}" style="height:40px;display:block;margin:0 auto 8px;" />` : "";
-    w.document.write(`<html><head><title>Receipt</title><style>body{font-family:'Courier New',monospace;font-size:12px;width:300px;margin:0 auto;padding:16px}h2{font-size:14px;text-align:center;margin:0}p{margin:2px 0}.c{text-align:center}.s{font-size:10px;color:#555}.line{border-top:1px dashed #000;margin:8px 0}.row{display:flex;justify-content:space-between}.bold{font-weight:bold}</style></head><body>${logo}${printRef.current?.innerHTML ?? ""}</body></html>`);
-    w.document.close(); w.focus(); w.print(); w.close();
+
+    const printHtml = `
+      <html>
+        <head>
+          <title>Receipt</title>
+          <style>
+            @page { size: 80mm auto; margin: 6mm; }
+            html, body { margin: 0; padding: 0; }
+            body { font-family: 'Courier New', monospace; font-size: 12px; width: 300px; margin: 0 auto; padding: 16px; color: #000; }
+            h2 { font-size: 14px; text-align: center; margin: 0; }
+            p { margin: 2px 0; }
+            .c { text-align: center; }
+            .s { font-size: 10px; color: #555; }
+            .line { border-top: 1px dashed #000; margin: 8px 0; }
+            .row { display: flex; justify-content: space-between; gap: 8px; }
+            .bold { font-weight: bold; }
+            @media print {
+              body { width: auto; padding: 0; }
+            }
+          </style>
+        </head>
+        <body>${logo}${printRef.current?.innerHTML ?? ""}</body>
+      </html>
+    `;
+
+    w.document.write(printHtml);
+    w.document.close();
+
+    const safeClose = () => {
+      setTimeout(() => {
+        try { w.close(); } catch { /* no-op */ }
+      }, 300);
+    };
+
+    w.addEventListener("afterprint", safeClose);
+    setTimeout(() => {
+      try {
+        w.focus();
+        w.print();
+      } catch {
+        setPrintError("Unable to open print dialog. Please print from your browser manually.");
+      }
+    }, 120);
   }
 
   return (
@@ -1017,6 +1065,7 @@ function ReceiptModal({ sale, businessInfo, onClose }: { sale: SaleRecord; busin
             {businessInfo.vatNumber && <p className="c s">VAT No: {businessInfo.vatNumber}</p>}
             <p className="c s">Thank you for visiting {businessInfo.name}!</p>
           </div>
+          {printError && <p className="mt-3 text-xs text-amber-300">{printError}</p>}
         </div>
         <div className="px-5 pb-5 pt-3 border-t border-amber-900/20 flex gap-2 shrink-0">
           <button onClick={handlePrint} className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-primary text-primary-foreground py-3 text-sm font-bold hover:opacity-90" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}><Printer size={14} /> PRINT RECEIPT</button>
