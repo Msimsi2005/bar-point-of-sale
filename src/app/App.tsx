@@ -2,9 +2,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   apiLogin, apiSaveTenant, apiAddSale,
   apiAdminLogin, apiAdminListTenants, apiAdminCreateTenant,
-  apiAdminCreateInvite, apiAdminListInvites, apiAdminDeleteInvite,
   apiAdminUpdateTenant, apiAdminDeleteTenant, apiExecuteSql,
 } from "../lib/api";
+import { API_BASE } from "../lib/supabase";
 import {
   X, Plus, Minus, CreditCard, Banknote, Users, Clock, ChevronRight,
   Receipt, Trash2, AlertCircle, Settings, ShoppingBag, Monitor,
@@ -12,7 +12,7 @@ import {
   Smartphone, Building2, Bitcoin, QrCode, Zap, BarChart2,
   TrendingUp, Calendar, ChevronDown, Tag, Star, LogOut,
   User, Shield, Upload, Phone, Mail, MapPin, Percent,
-  Info, Crown, CheckCircle, Eye, EyeOff, Store,
+  Info, CheckCircle, Eye, EyeOff, Store,
   UserCheck, Bell,
 } from "lucide-react";
 
@@ -75,6 +75,7 @@ interface Tenant {
 }
 
 interface Session { tenantId: string; staffId: string; }
+interface TenantSummary { email: string; name: string; createdAt: string; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -83,12 +84,6 @@ interface Session { tenantId: string; staffId: string; }
 const PAYMENT_ICONS: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
   cash: Banknote, card: CreditCard, qr: QrCode, bank: Building2,
   mobile: Smartphone, bitcoin: Bitcoin, zap: Zap,
-};
-
-const PLAN_LIMITS = {
-  starter: { staff: 2, products: 30, label: "Starter", price: "R299/mo" },
-  pro: { staff: 10, products: 200, label: "Professional", price: "R799/mo" },
-  enterprise: { staff: 999, products: 999, label: "Enterprise", price: "R1,999/mo" },
 };
 
 const CHANGELOG = [
@@ -132,6 +127,7 @@ function rowToTenant(row: any): Tenant {
     createdAt: new Date(row.createdAt ?? Date.now()),
   };
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SEED DATA
@@ -210,61 +206,14 @@ const TAPROOM_MENU: MenuItem[] = [
   { id: "t6", name: "Beer Battered Wings", category: "Snacks", price: 115, description: "6 wings · peri sauce", stock: -1, popular: true },
 ];
 
-function makeSales(menu: MenuItem[], staffId: string): SaleRecord[] {
-  const now = Date.now(); const day = 86400000;
-  const methods = ["Cash", "Card", "SnapScan"];
-  return Array.from({ length: 8 }, (_, i) => {
-    const items = [menu[i % menu.length], menu[(i + 2) % menu.length]].map((m) => ({ menuItem: m, qty: (i % 3) + 1 }));
-    const sub = items.reduce((s, o) => s + o.menuItem.price * o.qty, 0);
-    const tax = sub * 0.15;
-    return { id: uid(), tabName: ["Table " + (i + 1), "Guest " + String.fromCharCode(65 + i), "Tab " + (i * 2 + 1)][i % 3], items, subtotal: sub, tax, total: sub + tax, totalConverted: sub + tax, paymentMethod: methods[i % 3], currencyCode: "ZAR", currencySymbol: "R", timestamp: new Date(now - (i % 3) * day - i * 2 * 3600000), staffId };
-  });
-}
-
-const INITIAL_TENANTS: Tenant[] = [
-  {
-    id: "noir", email: "owner@noirvine.co.za", password: "demo123", plan: "pro",
-    businessInfo: { name: "Noir & Vine", logo: null, address: "12 Long Street, Cape Town, 8001", phone: "+27 21 123 4567", email: "hello@noirvine.co.za", website: "noirvine.co.za", regNumber: "2019/123456/07", vatNumber: "4130123456" },
-    config: makeConfig(),
-    menu: NOIR_MENU, sales: [],
-    customers: [
-      { id: "nc1", name: "Marcus Webb", email: "marcus@example.com", phone: "+27 82 345 6789", totalSpent: 2340, visits: 8, notes: "Prefers Old Fashioned" },
-      { id: "nc2", name: "Sofia Langeni", email: "sofia@example.com", phone: "+27 71 234 5678", totalSpent: 1890, visits: 6, notes: "" },
-    ],
-    staff: [
-      { id: "ns1", name: "Alex Dlamini", pin: "1234", role: "owner" },
-      { id: "ns2", name: "Jordan Khumalo", pin: "5678", role: "bartender" },
-      { id: "ns3", name: "Sam Nkosi", pin: "9999", role: "manager" },
-    ],
-    createdAt: new Date("2024-03-15"),
-  },
-  {
-    id: "roastery", email: "owner@roastery.co.za", password: "demo123", plan: "starter",
-    businessInfo: { name: "The Roastery", logo: null, address: "45 Bree Street, Cape Town", phone: "+27 21 987 6543", email: "hello@theroastery.co.za", website: "theroastery.co.za", regNumber: "2021/987654/07", vatNumber: "" },
-    config: makeConfig({ categories: [{ name: "Coffee", enabled: true }, { name: "Tea", enabled: true }, { name: "Food", enabled: true }, { name: "Drinks", enabled: true }] }),
-    menu: ROASTERY_MENU, sales: [], customers: [],
-    staff: [{ id: "rs1", name: "Priya Reddy", pin: "1111", role: "owner" }, { id: "rs2", name: "Liam Botha", pin: "2222", role: "bartender" }],
-    createdAt: new Date("2024-08-01"),
-  },
-  {
-    id: "taproom", email: "owner@taproom.co.za", password: "demo123", plan: "enterprise",
-    businessInfo: { name: "Taproom & Co", logo: null, address: "88 Buitenkant St, Cape Town", phone: "+27 21 555 0000", email: "hey@taproom.co.za", website: "taproom.co.za", regNumber: "2020/654321/07", vatNumber: "4130654321" },
-    config: makeConfig({ categories: [{ name: "Craft Beer", enabled: true }, { name: "Snacks", enabled: true }] }),
-    menu: TAPROOM_MENU, sales: [], customers: [],
-    staff: [{ id: "ts1", name: "Ethan van Wyk", pin: "3333", role: "owner" }],
-    createdAt: new Date("2023-11-20"),
-  },
-];
-INITIAL_TENANTS.forEach((t) => { t.sales = makeSales(t.menu, t.staff[0].id); });
-
 // ─────────────────────────────────────────────────────────────────────────────
 // LANDING (no public sign-in — admin-only onboarding)
 // ─────────────────────────────────────────────────────────────────────────────
 
 function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void; onSuperAdmin: () => void }) {
   const features = [
-    { icon: Store, title: "Multi-Venue Ready", desc: "Each business gets isolated POS, sales data, and staff." },
-    { icon: Users, title: "Staff & PIN Login", desc: "Role-based access for owners, managers, and bartenders." },
+    { icon: Store, title: "Multi-Venue Ready", desc: "Each business gets isolated POS, sales data, and users." },
+    { icon: Users, title: "User PIN Login", desc: "Role-based access for owners, managers, and bartenders." },
     { icon: Globe, title: "Multi-Currency", desc: "Accept ZAR, USD, EUR and more. Exchange rates you control." },
     { icon: BarChart2, title: "Sales Analytics", desc: "Daily reports, top items, payment breakdowns by date." },
     { icon: UserCheck, title: "Customer Accounts", desc: "Track visits, total spend, and notes for regulars." },
@@ -354,7 +303,7 @@ function SuperAdminLogin({ onSuccess, onBack }: { onSuccess: (token: string) => 
           {error && <div className="flex items-center gap-2 rounded-lg bg-red-900/20 border border-red-900/30 px-3 py-2.5 text-xs text-red-400 mb-4"><AlertCircle size={13} />{error}</div>}
           <div className="mb-3">
             <label className="text-xs text-muted-foreground mb-1 block">Email</label>
-            <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setError(""); }} placeholder="superadmin@pourpos.co.za" className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+            <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setError(""); }} placeholder="admin@yourcompany.com" className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" />
           </div>
           <div className="mb-5">
             <label className="text-xs text-muted-foreground mb-1 block">Password</label>
@@ -376,26 +325,22 @@ function SuperAdminLogin({ onSuccess, onBack }: { onSuccess: (token: string) => 
 // SUPERADMIN DASHBOARD
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface TenantSummary { email: string; name: string; plan: string; createdAt: string; }
-
 function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => void }) {
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
-  const [invites, setInvites] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ email: "", password: "", businessName: "", plan: "starter" });
+  const [form, setForm] = useState({ email: "", password: "", businessName: "" });
   const [formError, setFormError] = useState(""); const [formLoading, setFormLoading] = useState(false); const [formSuccess, setFormSuccess] = useState("");
-  const [inviteForm, setInviteForm] = useState({ email: "", businessName: "", plan: "starter" });
-  const [inviteError, setInviteError] = useState(""); const [inviteLoading, setInviteLoading] = useState(false); const [inviteSuccess, setInviteSuccess] = useState("");
   const [deletingEmail, setDeletingEmail] = useState<string | null>(null);
-  const [deletingInvite, setDeletingInvite] = useState<string | null>(null);
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
-  const [editPlan, setEditPlan] = useState("starter"); const [editPw, setEditPw] = useState(""); const [editLoading, setEditLoading] = useState(false);
-  const [sqlText, setSqlText] = useState("SELECT email, name, plan, createdAt FROM tenants LIMIT 25;");
+  const [editPw, setEditPw] = useState(""); const [editLoading, setEditLoading] = useState(false);
+  const [sqlText, setSqlText] = useState("SELECT email, name, createdAt FROM tenants LIMIT 25;");
   const [sqlResult, setSqlResult] = useState<any | null>(null);
   const [sqlError, setSqlError] = useState(""); const [sqlLoading, setSqlLoading] = useState(false);
 
-  useEffect(() => { loadTenants(); loadInvites(); }, []);
+  useEffect(() => {
+    loadTenants();
+  }, []);
 
   async function loadTenants() {
     setLoading(true);
@@ -404,48 +349,25 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
     finally { setLoading(false); }
   }
 
-  async function loadInvites() {
-    try { setInvites(await apiAdminListInvites(token)); }
-    catch (e: unknown) { /* ignore invite load errors for now */ }
-  }
-
   async function handleCreate() {
     if (!form.email.trim() || !form.password || !form.businessName.trim()) { setFormError("All fields are required."); return; }
     if (form.password.length < 6) { setFormError("Password must be at least 6 characters."); return; }
     setFormLoading(true); setFormError(""); setFormSuccess("");
     try {
-      await apiAdminCreateTenant(token, form);
-      setFormSuccess(`Company "${form.businessName}" registered successfully. Login PIN: 1234`);
-      setForm({ email: "", password: "", businessName: "", plan: "starter" });
+      await apiAdminCreateTenant(token, { ...form });
+      setFormSuccess(`Business "${form.businessName}" created. Billing is managed manually by superadmin. Default owner PIN: 1234`);
+      setForm({ email: "", password: "", businessName: "" });
       loadTenants();
     } catch (e: unknown) { setFormError(e instanceof Error ? e.message : "Failed to register"); }
     finally { setFormLoading(false); }
   }
 
-  async function handleInviteCreate() {
-    if (!inviteForm.email.trim() || !inviteForm.businessName.trim()) { setInviteError("Email and business name are required."); return; }
-    setInviteLoading(true); setInviteError(""); setInviteSuccess("");
-    try {
-      const result = await apiAdminCreateInvite(token, inviteForm.email.trim(), inviteForm.businessName.trim(), inviteForm.plan);
-      setInviteSuccess(`Invite created for ${result.email}. Token: ${result.inviteToken}`);
-      setInviteForm({ email: "", businessName: "", plan: "starter" });
-      loadInvites();
-    } catch (e: unknown) { setInviteError(e instanceof Error ? e.message : "Failed to create invite"); }
-    finally { setInviteLoading(false); }
-  }
-
-  async function handleInviteDelete(token: string) {
-    if (!window.confirm("Delete this invite?")) return;
-    setDeletingInvite(token);
-    try { await apiAdminDeleteInvite(token); loadInvites(); }
-    catch (e: unknown) { alert(e instanceof Error ? e.message : "Failed to delete invite"); }
-    finally { setDeletingInvite(null); }
-  }
-
   async function handleDelete(email: string) {
     if (!window.confirm(`Delete company "${email}"? This is permanent.`)) return;
     setDeletingEmail(email);
-    try { await apiAdminDeleteTenant(token, email); loadTenants(); }
+    try {
+      await apiAdminDeleteTenant(token, email); loadTenants();
+    }
     catch (e: unknown) { alert(e instanceof Error ? e.message : "Failed to delete"); }
     finally { setDeletingEmail(null); }
   }
@@ -453,7 +375,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
   async function handleEdit(email: string) {
     setEditLoading(true);
     try {
-      const patch: { plan?: string; password?: string } = { plan: editPlan };
+      const patch: { password?: string } = {};
       if (editPw.trim().length >= 6) patch.password = editPw.trim();
       await apiAdminUpdateTenant(token, email, patch);
       setEditingEmail(null); setEditPw(""); loadTenants();
@@ -474,11 +396,6 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
     }
   }
 
-  const planBadge = (plan: string) => {
-    const cls = plan === "enterprise" ? "text-amber-400 bg-amber-400/10 border-amber-400/20" : plan === "pro" ? "text-primary bg-primary/10 border-primary/20" : "text-muted-foreground bg-white/5 border-border";
-    return <span className={`text-[10px] font-bold border rounded px-2 py-0.5 uppercase ${cls}`} style={{ fontFamily: "'DM Mono', monospace" }}>{plan}</span>;
-  };
-
   return (
     <div className="min-h-screen bg-background text-foreground" style={{ fontFamily: "'Barlow', sans-serif" }}>
       {/* Header */}
@@ -491,7 +408,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-muted-foreground hidden sm:block">{tenants.length} companies registered</span>
+          <span className="text-xs text-muted-foreground hidden sm:block">{tenants.length} businesses managed</span>
           <button onClick={onBack} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">
             <LogOut size={13} /> Sign Out
           </button>
@@ -499,16 +416,15 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
       </header>
 
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-8">
-
         {/* Register new company */}
         <div className="rounded-2xl border border-primary/20 bg-primary/5 p-6">
           <div className="flex items-center gap-2 mb-5">
             <Plus size={16} className="text-primary" />
-            <h2 className="text-lg font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Register New Company</h2>
+            <h2 className="text-lg font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Create New Business</h2>
           </div>
           {formError && <div className="flex items-center gap-2 rounded-lg bg-red-900/20 border border-red-900/30 px-3 py-2.5 text-xs text-red-400 mb-4"><AlertCircle size={13} />{formError}</div>}
           {formSuccess && <div className="flex items-center gap-2 rounded-lg bg-green-900/20 border border-green-900/30 px-3 py-2.5 text-xs text-green-400 mb-4"><CheckCircle size={13} />{formSuccess}</div>}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Business Name *</label>
               <input value={form.businessName} onChange={(e) => setForm({ ...form, businessName: e.target.value })} placeholder="Noir & Vine" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
@@ -521,82 +437,16 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
               <label className="text-xs text-muted-foreground mb-1 block">Password *</label>
               <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Min 6 characters" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
             </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Plan</label>
-              <select value={form.plan} onChange={(e) => setForm({ ...form, plan: e.target.value })} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">
-                <option value="starter">Starter — R299/mo</option>
-                <option value="pro">Professional — R799/mo</option>
-                <option value="enterprise">Enterprise — R1,999/mo</option>
-              </select>
-            </div>
           </div>
           <button onClick={handleCreate} disabled={formLoading} className="flex items-center gap-2 rounded-xl bg-primary text-primary-foreground px-6 py-3 text-sm font-bold hover:opacity-90 disabled:opacity-50 transition-opacity" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
-            <Plus size={14} /> {formLoading ? "Registering…" : "REGISTER COMPANY"}
+            <Plus size={14} /> {formLoading ? "Creating…" : "CREATE BUSINESS"}
           </button>
-          <p className="text-xs text-muted-foreground mt-3">Default staff PIN is <span className="font-mono font-bold text-foreground">1234</span> — the owner can change it in their Admin panel.</p>
-        </div>
-
-        <div className="rounded-2xl border border-border bg-card/20 p-6">
-          <div className="flex items-center gap-2 mb-5">
-            <Plus size={16} className="text-primary" />
-            <h2 className="text-lg font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Create Invite</h2>
-          </div>
-          {inviteError && <div className="flex items-center gap-2 rounded-lg bg-red-900/20 border border-red-900/30 px-3 py-2.5 text-xs text-red-400 mb-4"><AlertCircle size={13} />{inviteError}</div>}
-          {inviteSuccess && <div className="flex items-center gap-2 rounded-lg bg-green-900/20 border border-green-900/30 px-3 py-2.5 text-xs text-green-400 mb-4"><CheckCircle size={13} />{inviteSuccess}</div>}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Invite Email *</label>
-              <input type="email" value={inviteForm.email} onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })} placeholder="owner@venue.co.za" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Business Name *</label>
-              <input value={inviteForm.businessName} onChange={(e) => setInviteForm({ ...inviteForm, businessName: e.target.value })} placeholder="Noir & Vine" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Plan</label>
-              <select value={inviteForm.plan} onChange={(e) => setInviteForm({ ...inviteForm, plan: e.target.value })} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">
-                <option value="starter">Starter — R299/mo</option>
-                <option value="pro">Professional — R799/mo</option>
-                <option value="enterprise">Enterprise — R1,999/mo</option>
-              </select>
-            </div>
-            <div className="flex items-end">
-              <button onClick={handleInviteCreate} disabled={inviteLoading} className="w-full rounded-xl bg-primary text-primary-foreground px-6 py-3 text-sm font-bold hover:opacity-90 disabled:opacity-50 transition-opacity" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
-                {inviteLoading ? "Creating…" : "CREATE INVITE"}
-              </button>
-            </div>
-          </div>
-          <p className="text-xs text-muted-foreground">Invite tokens are single-use and secure registration for a specific email.</p>
-        </div>
-
-        <div className="rounded-2xl border border-border bg-card/20 p-6">
-          <div className="flex items-center gap-2 mb-5">
-            <Users size={16} className="text-primary" />
-            <h2 className="text-lg font-bold text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Pending Invites</h2>
-          </div>
-          {invites.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No pending invites. Create one to let venues register.</p>
-          ) : (
-            <div className="space-y-3">
-              {invites.map((invite) => (
-                <div key={invite.token} className="rounded-xl border border-border bg-background p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div>
-                    <p className="font-semibold text-foreground">{invite.businessName}</p>
-                    <p className="text-xs text-muted-foreground">{invite.email} • {invite.plan} • created {new Date(invite.createdAt).toLocaleDateString()}</p>
-                    <p className="text-xs text-muted-foreground mt-1">Token: <span className="font-mono text-foreground">{invite.token}</span></p>
-                  </div>
-                  <button onClick={() => handleInviteDelete(invite.token)} disabled={deletingInvite === invite.token} className="rounded-xl border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">
-                    {deletingInvite === invite.token ? "Deleting…" : "Delete Invite"}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          <p className="text-xs text-muted-foreground mt-3">Billing is handled manually by superadmin. Business owners create additional users from the company admin panel.</p>
         </div>
 
         {/* Companies list */}
         <div>
-          <h2 className="text-lg font-bold mb-4" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Registered Companies</h2>
+          <h2 className="text-lg font-bold mb-4" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Managed Businesses</h2>
           {loading ? (
             <div className="rounded-xl border border-border bg-card/20 p-12 text-center">
               <p className="text-sm text-muted-foreground">Loading companies…</p>
@@ -620,7 +470,6 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-bold text-foreground">{t.name}</p>
-                        {planBadge(t.plan)}
                       </div>
                       <p className="text-xs text-muted-foreground mt-0.5" style={{ fontFamily: "'DM Mono', monospace" }}>{t.email}</p>
                     </div>
@@ -629,7 +478,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
                     </p>
                     <div className="flex items-center gap-2 shrink-0">
                       <button
-                        onClick={() => { setEditingEmail(editingEmail === t.email ? null : t.email); setEditPlan(t.plan); setEditPw(""); }}
+                        onClick={() => { setEditingEmail(editingEmail === t.email ? null : t.email); setEditPw(""); }}
                         className="p-2 rounded-lg text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
                       ><Edit2 size={14} /></button>
                       <button
@@ -645,19 +494,11 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
                       <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Edit {t.name}</p>
                       <div className="flex flex-wrap gap-3 items-end">
                         <div>
-                          <label className="text-xs text-muted-foreground mb-1 block">Plan</label>
-                          <select value={editPlan} onChange={(e) => setEditPlan(e.target.value)} className="rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50">
-                            <option value="starter">Starter</option>
-                            <option value="pro">Professional</option>
-                            <option value="enterprise">Enterprise</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="text-xs text-muted-foreground mb-1 block">Reset Password (leave blank to keep)</label>
+                          <label className="text-xs text-muted-foreground mb-1 block">Reset Owner Password</label>
                           <input type="password" value={editPw} onChange={(e) => setEditPw(e.target.value)} placeholder="New password…" className="rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 w-48" />
                         </div>
                         <button onClick={() => handleEdit(t.email)} disabled={editLoading} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50">
-                          <Save size={13} /> {editLoading ? "Saving…" : "Save"}
+                          <Save size={13} /> {editLoading ? "Saving…" : "Update Access"}
                         </button>
                         <button onClick={() => setEditingEmail(null)} className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
                       </div>
@@ -770,7 +611,7 @@ function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant) => void; onBack:
             {loading ? "Signing in…" : "ACCESS MY POS"}
           </button>
           <div className="mt-4 text-center text-xs text-muted-foreground">
-            <p>Need access? Ask your PourPOS administrator for an invite token.</p>
+            <p>Need access? Ask your superadmin to create your business and owner account.</p>
           </div>
         </div>
       </div>
@@ -1112,6 +953,10 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
   const update = useCallback((patch: Partial<Tenant>) => onTenantChange({ ...tenant, ...patch }), [tenant, onTenantChange]);
   const updateConfig = useCallback((cfg: Partial<TenantConfig>) => update({ config: { ...config, ...cfg } }), [config, update]);
 
+  useEffect(() => {
+    setBizForm({ ...businessInfo });
+  }, [businessInfo]);
+
   function saveProduct() {
     if (!productForm.name.trim() || productForm.price <= 0) return;
     const newMenu = editingProduct ? menu.map((m) => m.id === editingProduct.id ? productForm : m) : [...menu, { ...productForm, id: uid() }];
@@ -1121,8 +966,26 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
   function handleLogoUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]; if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => { const logo = ev.target?.result as string; setBizForm((b) => ({ ...b, logo })); update({ businessInfo: { ...businessInfo, ...bizForm, logo } }); };
+    reader.onload = (ev) => {
+      const logo = ev.target?.result as string;
+      setBizForm((current) => {
+        const next = { ...current, logo };
+        update({ businessInfo: next });
+        return next;
+      });
+      e.target.value = "";
+    };
     reader.readAsDataURL(file);
+  }
+
+  function saveBusinessInfo() {
+    const trimmedName = bizForm.name.trim();
+    if (!trimmedName) return;
+    const next = { ...bizForm, name: trimmedName };
+    setBizForm(next);
+    update({ businessInfo: next });
+    setBizSaved(true);
+    setTimeout(() => setBizSaved(false), 2000);
   }
 
   const enabledCats = config.categories.filter((c) => c.enabled).map((c) => c.name);
@@ -1143,7 +1006,7 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
           <span className="text-muted-foreground/30">|</span>
           <span className="text-primary text-sm font-bold tracking-widest" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>ADMIN</span>
         </div>
-        <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${tenant.plan==="enterprise"?"text-amber-400 border-amber-400/30 bg-amber-400/10":tenant.plan==="pro"?"text-primary border-primary/30 bg-primary/10":"text-muted-foreground border-border"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{PLAN_LIMITS[tenant.plan].label.toUpperCase()}</span>
+        <span className="text-[10px] font-bold px-2 py-0.5 rounded border text-muted-foreground border-border" style={{ fontFamily: "'DM Mono', monospace" }}>MANAGED ACCOUNT</span>
       </header>
       <div className="flex flex-1 overflow-hidden">
         <aside className="w-44 shrink-0 border-r border-border bg-card/30 flex flex-col py-3 gap-0.5 px-2 overflow-y-auto">
@@ -1286,7 +1149,7 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
                   </div>
                   <div className="space-y-2">
                     <button onClick={()=>logoRef.current?.click()} className="flex items-center gap-2 rounded-lg border border-border px-4 py-2.5 text-sm text-foreground hover:bg-white/5"><Upload size={14} /> Upload Logo</button>
-                    {bizForm.logo && <button onClick={()=>{setBizForm((b)=>({...b,logo:null}));update({businessInfo:{...businessInfo,...bizForm,logo:null}});}} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300"><Trash2 size={12} /> Remove</button>}
+                    {bizForm.logo && <button onClick={()=>{setBizForm((current)=>{const next={...current,logo:null};update({businessInfo:next});return next;});}} className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300"><Trash2 size={12} /> Remove</button>}
                     <p className="text-xs text-muted-foreground">PNG, JPG, SVG</p>
                   </div>
                 </div>
@@ -1296,21 +1159,22 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
                 {([["Business Name","name",Store,"Noir & Vine"],["Address","address",MapPin,"12 Long St, Cape Town"],["Phone","phone",Phone,"+27 21 123 4567"],["Email","email",Mail,"hello@yourvenue.co.za"],["Website","website",Globe,"yourvenue.co.za"],["Reg. Number","regNumber",Building2,"2019/123456/07"],["VAT Number","vatNumber",Percent,"4130123456"]] as [string, keyof BusinessInfo, React.ComponentType<{size?:number}>, string][]).map(([label, key, Icon, ph]) => (
                   <div key={key}><label className="text-xs text-muted-foreground mb-1 flex items-center gap-1.5"><Icon size={11} />{label}</label><input value={bizForm[key] ?? ""} onChange={(e)=>setBizForm((b)=>({...b,[key]:e.target.value}))} placeholder={ph} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                 ))}
-                <button onClick={()=>{update({businessInfo:bizForm});setBizSaved(true);setTimeout(()=>setBizSaved(false),2000);}} className={`w-full rounded-xl py-3 text-sm font-bold flex items-center justify-center gap-2 transition-all ${bizSaved?"bg-green-600 text-white":"bg-primary text-primary-foreground hover:opacity-90"}`} style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{bizSaved?<><Check size={14}/> SAVED</>:<><Save size={14}/> SAVE CHANGES</>}</button>
+                <button onClick={saveBusinessInfo} disabled={!bizForm.name.trim()} className={`w-full rounded-xl py-3 text-sm font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${bizSaved?"bg-green-600 text-white":"bg-primary text-primary-foreground hover:opacity-90"}`} style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{bizSaved?<><Check size={14}/> SAVED</>:<><Save size={14}/> SAVE CHANGES</>}</button>
               </div>
             </div>
           )}
 
           {section === "staff" && (
             <div className="max-w-lg">
-              <h2 className="text-xl font-bold mb-5" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Staff</h2>
+              <h2 className="text-xl font-bold mb-1" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Business Users</h2>
+              <p className="text-sm text-muted-foreground mb-5">Company admins manage the users who can access this business.</p>
               <div className="space-y-2 mb-5">{tenant.staff.map((s) => <div key={s.id} className="flex items-center gap-3 rounded-xl border border-border bg-card/30 px-4 py-3"><div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{s.name[0]}</span></div><div className="flex-1"><p className="text-sm font-semibold">{s.name}</p><p className="text-xs text-muted-foreground capitalize">{s.role} · PIN: ••••</p></div>{s.role!=="owner"&&<button onClick={()=>update({staff:tenant.staff.filter((st)=>st.id!==s.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>}</div>)}</div>
               <div className="rounded-xl border border-dashed border-border p-4">
-                <p className="text-xs text-muted-foreground mb-3 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Add Staff</p>
+                <p className="text-xs text-muted-foreground mb-3 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Add User</p>
                 <div className="space-y-2">
                   <input value={newStaffName} onChange={(e)=>setNewStaffName(e.target.value)} placeholder="Full name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
                   <div className="flex gap-2"><input value={newStaffPin} onChange={(e)=>setNewStaffPin(e.target.value.replace(/\D/g,"").slice(0,4))} placeholder="4-digit PIN" maxLength={4} className="flex-1 rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none" style={{ fontFamily: "'DM Mono', monospace" }} /><select value={newStaffRole} onChange={(e)=>setNewStaffRole(e.target.value as StaffMember["role"])} className="rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground focus:outline-none"><option value="bartender">Bartender</option><option value="manager">Manager</option></select></div>
-                  <button onClick={()=>{if(!newStaffName.trim()||newStaffPin.length!==4)return;update({staff:[...tenant.staff,{id:uid(),name:newStaffName.trim(),pin:newStaffPin,role:newStaffRole}]});setNewStaffName("");setNewStaffPin("");setNewStaffRole("bartender");}} disabled={!newStaffName.trim()||newStaffPin.length!==4} className="w-full rounded-lg bg-primary/15 border border-primary/25 text-primary py-2 text-sm font-semibold hover:bg-primary/20 disabled:opacity-30">+ Add Staff Member</button>
+                  <button onClick={()=>{if(!newStaffName.trim()||newStaffPin.length!==4)return;update({staff:[...tenant.staff,{id:uid(),name:newStaffName.trim(),pin:newStaffPin,role:newStaffRole}]});setNewStaffName("");setNewStaffPin("");setNewStaffRole("bartender");}} disabled={!newStaffName.trim()||newStaffPin.length!==4} className="w-full rounded-lg bg-primary/15 border border-primary/25 text-primary py-2 text-sm font-semibold hover:bg-primary/20 disabled:opacity-30">+ Add Business User</button>
                 </div>
               </div>
             </div>
@@ -1343,11 +1207,12 @@ function AdminPanel({ tenant, onTenantChange, onBack }: { tenant: Tenant; onTena
             <div className="max-w-xl">
               <h2 className="text-xl font-bold mb-5" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>System</h2>
               <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
-                <div className="flex items-center justify-between mb-3"><p className="text-xs text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Plan</p><span className={`text-xs font-bold px-2 py-0.5 rounded border ${tenant.plan==="enterprise"?"text-amber-400 border-amber-400/30 bg-amber-400/10":tenant.plan==="pro"?"text-primary border-primary/30 bg-primary/10":"text-muted-foreground border-border"}`}>{PLAN_LIMITS[tenant.plan].label}</span></div>
-                <div className="grid grid-cols-3 gap-3">
-                  {(["starter","pro","enterprise"] as const).map((p) => <button key={p} onClick={()=>update({plan:p})} className={`rounded-xl border p-3 text-center transition-all ${tenant.plan===p?"border-primary/40 bg-primary/10":"border-border hover:bg-white/5"}`}>{p==="enterprise"&&<Crown size={14} className="text-amber-400 mx-auto mb-1" />}<p className={`text-xs font-bold ${tenant.plan===p?"text-primary":""}`}>{PLAN_LIMITS[p].label}</p><p className="text-[10px] text-muted-foreground mt-0.5" style={{ fontFamily: "'DM Mono', monospace" }}>{PLAN_LIMITS[p].price}</p></button>)}
+                <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Management</p>
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>Subscriptions and automated plans have been removed.</p>
+                  <p>Billing is handled manually by superadmin outside the app.</p>
+                  <p>Business users are created and managed from the company admin panel.</p>
                 </div>
-                <div className="grid grid-cols-2 gap-2 mt-3 text-xs text-muted-foreground"><div className="flex items-center gap-1.5"><Users size={11} /> {tenant.staff.length}/{PLAN_LIMITS[tenant.plan].staff===999?"∞":PLAN_LIMITS[tenant.plan].staff} staff</div><div className="flex items-center gap-1.5"><Package size={11} /> {tenant.menu.length}/{PLAN_LIMITS[tenant.plan].products===999?"∞":PLAN_LIMITS[tenant.plan].products} products</div></div>
               </div>
               <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
                 <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Account</p>
@@ -1597,17 +1462,89 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   );
 }
 
+function BackendGate({
+  status,
+  message,
+  onRetry,
+}: {
+  status: "checking" | "ready" | "down";
+  message: string;
+  onRetry: () => void;
+}) {
+  if (status === "ready") return null;
+
+  return (
+    <div className="min-h-screen bg-background text-foreground flex items-center justify-center px-4" style={{ fontFamily: "'Barlow', sans-serif" }}>
+      <div className="w-full max-w-lg rounded-2xl border border-border bg-card/40 p-7">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-9 h-9 rounded-lg bg-primary/20 border border-primary/30 flex items-center justify-center">
+            <AlertCircle size={16} className={status === "checking" ? "text-primary" : "text-red-400"} />
+          </div>
+          <h2 className="text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
+            {status === "checking" ? "Checking Backend" : "Backend Not Reachable"}
+          </h2>
+        </div>
+
+        {status === "checking" ? (
+          <p className="text-sm text-muted-foreground">Validating Supabase/API connectivity before loading the app...</p>
+        ) : (
+          <>
+            <p className="text-sm text-muted-foreground mb-3">{message}</p>
+            <p className="text-xs text-muted-foreground/80 mb-5">API base: {API_BASE}</p>
+            <button
+              onClick={onRetry}
+              className="rounded-xl bg-primary text-primary-foreground px-5 py-2.5 text-sm font-bold hover:opacity-90 transition-opacity"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+            >
+              Retry Connection
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ROOT
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [backendStatus, setBackendStatus] = useState<"checking" | "ready" | "down">("checking");
+  const [backendMessage, setBackendMessage] = useState("Connecting to Supabase API...");
   const [screen, setScreen] = useState<AppScreen>("landing");
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [staffConfirmed, setStaffConfirmed] = useState(false);
   const [adminToken, setAdminToken] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const verifyBackend = useCallback(async () => {
+    setBackendStatus("checking");
+    setBackendMessage("Connecting to Supabase API...");
+    try {
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "healthcheck@invalid.local", password: "invalid" }),
+      });
+
+      const reachableStatus = res.ok || [400, 401, 403, 422].includes(res.status);
+      if (!reachableStatus) {
+        throw new Error(`Unexpected API response (${res.status}).`);
+      }
+
+      setBackendStatus("ready");
+      setBackendMessage("");
+    } catch {
+      setBackendStatus("down");
+      setBackendMessage("Supabase API is unavailable or blocked by CORS. Please verify your function deployment and environment settings.");
+    }
+  }, []);
+
+  useEffect(() => {
+    verifyBackend();
+  }, [verifyBackend]);
 
   function handleVenueLogin(t: Tenant) {
     setTenant(t);
@@ -1640,7 +1577,7 @@ export default function App() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       apiSaveTenant(updated.email, {
-        plan: updated.plan, businessInfo: updated.businessInfo,
+        businessInfo: updated.businessInfo,
         config: updated.config, menu: updated.menu,
         staff: updated.staff, customers: updated.customers,
       }).catch(console.error);
@@ -1655,6 +1592,10 @@ export default function App() {
     saveTimer.current = setTimeout(() => {
       apiSaveTenant(updatedTenant.email, { customers: updatedTenant.customers }).catch(console.error);
     }, 500);
+  }
+
+  if (backendStatus !== "ready") {
+    return <BackendGate status={backendStatus} message={backendMessage} onRetry={verifyBackend} />;
   }
 
   // ── Screen routing ───────────────────────────────────────────────────────

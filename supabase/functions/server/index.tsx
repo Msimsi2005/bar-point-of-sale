@@ -2,7 +2,7 @@ import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
 import { createClient } from "npm:@supabase/postgres-js";
-import * as kv from "./kv_store.tsx";
+import { createClient as createSupabaseClient } from "jsr:@supabase/supabase-js@2.49.8";
 
 const app = new Hono();
 
@@ -23,6 +23,13 @@ function isSuperAdmin(c: any): boolean {
   const auth = c.req.header("Authorization") ?? "";
   const token = auth.replace("Bearer ", "");
   return token === SUPERADMIN_PASSWORD;
+}
+
+function db() {
+  const url = Deno.env.get("SUPABASE_URL");
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured");
+  return createSupabaseClient(url, key);
 }
 
 // ── Health ──────────────────────────────────────────────────────────────────
@@ -54,32 +61,30 @@ async function hashPassword(pw: string): Promise<string> {
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function tenantKey(email: string) { return `tenant:${email.toLowerCase().trim()}`; }
-function salesKey(email: string)  { return `sales:${email.toLowerCase().trim()}`; }
-function inviteKey(token: string) { return `invite:${token}`; }
-const INDEX_KEY = "tenant_index";
-const INVITE_INDEX_KEY = "invite_index";
-
-async function addToIndex(entry: object) {
-  const index: any[] = (await kv.get(INDEX_KEY)) ?? [];
-  index.push(entry);
-  await kv.set(INDEX_KEY, index);
+function normalizeEmail(email: string) {
+  return email.toLowerCase().trim();
 }
 
-async function addInviteToIndex(entry: object) {
-  const index: any[] = (await kv.get(INVITE_INDEX_KEY)) ?? [];
-  index.push(entry);
-  await kv.set(INVITE_INDEX_KEY, index);
+function toTenantSummary(row: any) {
+  return {
+    email: row.email,
+    name: row.business_info?.name ?? "",
+    createdAt: row.created_at ?? new Date().toISOString(),
+  };
 }
 
-async function removeInviteFromIndex(token: string) {
-  const index: any[] = (await kv.get(INVITE_INDEX_KEY)) ?? [];
-  await kv.set(INVITE_INDEX_KEY, index.filter((t: any) => t.token !== token));
-}
-
-async function removeFromIndex(email: string) {
-  const index: any[] = (await kv.get(INDEX_KEY)) ?? [];
-  await kv.set(INDEX_KEY, index.filter((t: any) => t.email !== email.toLowerCase().trim()));
+function toTenantResponse(row: any, sales: any[]) {
+  return {
+    id: row.id,
+    email: row.email,
+    businessInfo: row.business_info ?? {},
+    config: row.config ?? defaultConfig(),
+    menu: row.menu ?? [],
+    customers: row.customers ?? [],
+    staff: row.staff ?? [],
+    createdAt: row.created_at ?? new Date().toISOString(),
+    sales,
+  };
 }
 
 // ── SUPERADMIN: login ────────────────────────────────────────────────────────
@@ -92,155 +97,76 @@ app.post("/make-server-b88a7963/admin/login", async (c) => {
   return c.json({ token: SUPERADMIN_PASSWORD });
 });
 
-// ── SUPERADMIN: invite management ─────────────────────────────────────────────
-app.post("/make-server-b88a7963/admin/invites", async (c) => {
-  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
-
-  const { email, businessName, plan } = await c.req.json();
-  if (!email || !businessName) return c.json({ error: "Missing fields" }, 400);
-
-  const normalizedEmail = email.toLowerCase().trim();
-  const inviteToken = crypto.randomUUID();
-  const invite = {
-    token: inviteToken,
-    email: normalizedEmail,
-    businessName,
-    plan: plan ?? "starter",
-    createdAt: new Date().toISOString(),
-  };
-
-  await kv.set(inviteKey(inviteToken), invite);
-  await addInviteToIndex(invite);
-
-  return c.json({ inviteToken, email: normalizedEmail, businessName: invite.businessName, plan: invite.plan }, 201);
-});
-
-app.get("/make-server-b88a7963/admin/invites", async (c) => {
-  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
-  const invites = (await kv.get(INVITE_INDEX_KEY)) ?? [];
-  return c.json(invites);
-});
-
-app.delete("/make-server-b88a7963/admin/invites/:token", async (c) => {
-  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
-  const token = c.req.param("token");
-  await kv.del(inviteKey(token));
-  await removeInviteFromIndex(token);
-  return c.json({ ok: true });
-});
-
-// ── VENUE: register ──────────────────────────────────────────────────────────
-app.post("/make-server-b88a7963/auth/register", async (c) => {
-  const { email, password, businessName, inviteToken } = await c.req.json();
-  if (!email || !password || !businessName || !inviteToken) {
-    return c.json({ error: "Missing fields or invite token" }, 400);
-  }
-
-  const invite = await kv.get(inviteKey(inviteToken));
-  if (!invite) return c.json({ error: "Invite token is invalid or expired" }, 403);
-  if (invite.email.toLowerCase().trim() !== email.toLowerCase().trim()) {
-    return c.json({ error: "Invite email does not match registration email" }, 403);
-  }
-
-  const existing = await kv.get(tenantKey(email));
-  if (existing) return c.json({ error: "Email already registered" }, 409);
-
-  const passwordHash = await hashPassword(password);
-  const staffOwnerId = crypto.randomUUID();
-
-  const tenant = {
-    id: crypto.randomUUID(),
-    email: email.toLowerCase().trim(),
-    passwordHash,
-    plan: invite.plan ?? "starter",
-    businessInfo: {
-      name: businessName,
-      logo: null,
-      address: "",
-      phone: "",
-      email: email.toLowerCase().trim(),
-      website: "",
-      regNumber: "",
-      vatNumber: "",
-    },
-    config: defaultConfig(),
-    menu: [],
-    customers: [],
-    staff: [{ id: staffOwnerId, name: businessName, pin: "1234", role: "owner" }],
-    createdAt: new Date().toISOString(),
-  };
-
-  await kv.set(tenantKey(email), tenant);
-  await kv.set(salesKey(email), []);
-  await addToIndex({ email: tenant.email, name: businessName, plan: tenant.plan, createdAt: tenant.createdAt });
-  await kv.del(inviteKey(inviteToken));
-  await removeInviteFromIndex(inviteToken);
-
-  const { passwordHash: _, ...safe } = tenant;
-  return c.json({ ...safe, sales: [] }, 201);
-});
-
 // ── SUPERADMIN: list all tenants ─────────────────────────────────────────────
 app.get("/make-server-b88a7963/admin/tenants", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
-  const index = (await kv.get(INDEX_KEY)) ?? [];
-  return c.json(index);
+  const supabase = db();
+  const { data, error } = await supabase
+    .from("tenants")
+    .select("email, business_info, created_at")
+    .order("created_at", { ascending: false });
+  if (error) return c.json({ error: error.message }, 400);
+  return c.json((data ?? []).map(toTenantSummary));
 });
 
 // ── SUPERADMIN: register a company ───────────────────────────────────────────
 app.post("/make-server-b88a7963/admin/tenants", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
-  const { email, password, businessName, plan } = await c.req.json();
+  const { email, password, businessName } = await c.req.json();
   if (!email || !password || !businessName) return c.json({ error: "Missing fields" }, 400);
 
-  const existing = await kv.get(tenantKey(email));
+  const supabase = db();
+  const normalizedEmail = normalizeEmail(email);
+  const { data: existing, error: existingError } = await supabase
+    .from("tenants")
+    .select("email")
+    .eq("email", normalizedEmail)
+    .maybeSingle();
+  if (existingError) return c.json({ error: existingError.message }, 400);
   if (existing) return c.json({ error: "Email already registered" }, 409);
 
   const passwordHash = await hashPassword(password);
   const staffOwnerId = crypto.randomUUID();
 
-  const tenant = {
+  const tenantRow = {
     id: crypto.randomUUID(),
-    email: email.toLowerCase().trim(),
-    passwordHash,
-    plan: plan ?? "starter",
-    businessInfo: {
+    email: normalizedEmail,
+    password_hash: passwordHash,
+    business_info: {
       name: businessName, logo: null, address: "", phone: "",
-      email: email.toLowerCase().trim(), website: "", regNumber: "", vatNumber: "",
+      email: normalizedEmail, website: "", regNumber: "", vatNumber: "",
     },
     config: defaultConfig(),
     menu: [],
     customers: [],
     staff: [{ id: staffOwnerId, name: businessName, pin: "1234", role: "owner" }],
-    createdAt: new Date().toISOString(),
   };
 
-  await kv.set(tenantKey(email), tenant);
-  await kv.set(salesKey(email), []);
-  await addToIndex({ email: tenant.email, name: businessName, plan: tenant.plan, createdAt: tenant.createdAt });
+  const { data: created, error: createError } = await supabase
+    .from("tenants")
+    .insert(tenantRow)
+    .select("id, email, business_info, config, menu, customers, staff, created_at")
+    .single();
+  if (createError) return c.json({ error: createError.message }, 400);
 
-  const { passwordHash: _, ...safe } = tenant;
-  return c.json(safe, 201);
+  return c.json(toTenantResponse(created, []), 201);
 });
 
-// ── SUPERADMIN: update tenant (plan, reset password) ─────────────────────────
+// ── SUPERADMIN: update tenant (reset password) ───────────────────────────────
 app.patch("/make-server-b88a7963/admin/tenants/:email", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
-  const email = decodeURIComponent(c.req.param("email"));
-  const existing = await kv.get(tenantKey(email));
-  if (!existing) return c.json({ error: "Not found" }, 404);
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const supabase = db();
 
   const body = await c.req.json();
-  const patch: any = { ...existing };
-  if (body.plan) patch.plan = body.plan;
-  if (body.password) patch.passwordHash = await hashPassword(body.password);
+  if (!body.password) return c.json({ ok: true });
+  const passwordHash = await hashPassword(body.password);
 
-  await kv.set(tenantKey(email), patch);
-
-  // Update index entry
-  const index: any[] = (await kv.get(INDEX_KEY)) ?? [];
-  const updated = index.map((t: any) => t.email === email.toLowerCase() ? { ...t, plan: patch.plan } : t);
-  await kv.set(INDEX_KEY, updated);
+  const { error } = await supabase
+    .from("tenants")
+    .update({ password_hash: passwordHash })
+    .eq("email", email);
+  if (error) return c.json({ error: error.message }, 400);
 
   return c.json({ ok: true });
 });
@@ -248,10 +174,10 @@ app.patch("/make-server-b88a7963/admin/tenants/:email", async (c) => {
 // ── SUPERADMIN: delete a company ─────────────────────────────────────────────
 app.delete("/make-server-b88a7963/admin/tenants/:email", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
-  const email = decodeURIComponent(c.req.param("email"));
-  await kv.del(tenantKey(email));
-  await kv.del(salesKey(email));
-  await removeFromIndex(email);
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const supabase = db();
+  const { error } = await supabase.from("tenants").delete().eq("email", email);
+  if (error) return c.json({ error: error.message }, 400);
   return c.json({ ok: true });
 });
 
@@ -260,65 +186,128 @@ app.post("/make-server-b88a7963/auth/login", async (c) => {
   const { email, password } = await c.req.json();
   if (!email || !password) return c.json({ error: "Missing fields" }, 400);
 
-  const tenant = await kv.get(tenantKey(email));
+  const supabase = db();
+  const normalizedEmail = normalizeEmail(email);
+  const { data: tenant, error } = await supabase
+    .from("tenants")
+    .select("id, email, password_hash, business_info, config, menu, customers, staff, created_at")
+    .eq("email", normalizedEmail)
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 400);
   if (!tenant) return c.json({ error: "Invalid email or password" }, 401);
 
   const hash = await hashPassword(password);
-  if (hash !== tenant.passwordHash) return c.json({ error: "Invalid email or password" }, 401);
+  if (hash !== tenant.password_hash) return c.json({ error: "Invalid email or password" }, 401);
 
-  const sales = (await kv.get(salesKey(email))) ?? [];
-  const { passwordHash: _, ...safe } = tenant;
-  return c.json({ ...safe, sales });
+  const { data: salesRows, error: salesError } = await supabase
+    .from("sales")
+    .select("sale, saved_at")
+    .eq("tenant_email", normalizedEmail)
+    .order("saved_at", { ascending: false })
+    .limit(500);
+  if (salesError) return c.json({ error: salesError.message }, 400);
+
+  const sales = (salesRows ?? []).map((row: any) => ({ ...(row.sale ?? {}), savedAt: row.saved_at }));
+  return c.json(toTenantResponse(tenant, sales));
 });
 
 // ── VENUE: get tenant ─────────────────────────────────────────────────────────
 app.get("/make-server-b88a7963/tenant/:email", async (c) => {
-  const email = decodeURIComponent(c.req.param("email"));
-  const tenant = await kv.get(tenantKey(email));
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const supabase = db();
+  const { data: tenant, error } = await supabase
+    .from("tenants")
+    .select("id, email, business_info, config, menu, customers, staff, created_at")
+    .eq("email", email)
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 400);
   if (!tenant) return c.json({ error: "Not found" }, 404);
-  const sales = (await kv.get(salesKey(email))) ?? [];
-  const { passwordHash: _, ...safe } = tenant;
-  return c.json({ ...safe, sales });
+
+  const { data: salesRows, error: salesError } = await supabase
+    .from("sales")
+    .select("sale, saved_at")
+    .eq("tenant_email", email)
+    .order("saved_at", { ascending: false })
+    .limit(500);
+  if (salesError) return c.json({ error: salesError.message }, 400);
+
+  const sales = (salesRows ?? []).map((row: any) => ({ ...(row.sale ?? {}), savedAt: row.saved_at }));
+  return c.json(toTenantResponse(tenant, sales));
 });
 
 // ── VENUE: save tenant ────────────────────────────────────────────────────────
 app.put("/make-server-b88a7963/tenant/:email", async (c) => {
-  const email = decodeURIComponent(c.req.param("email"));
-  const existing = await kv.get(tenantKey(email));
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const supabase = db();
+  const { data: existing, error: existingError } = await supabase
+    .from("tenants")
+    .select("id, email")
+    .eq("email", email)
+    .maybeSingle();
+  if (existingError) return c.json({ error: existingError.message }, 400);
   if (!existing) return c.json({ error: "Not found" }, 404);
+
   const body = await c.req.json();
-  const updated = { ...existing, ...body, passwordHash: existing.passwordHash, email: existing.email };
-  await kv.set(tenantKey(email), updated);
 
-  // Keep index name/plan in sync
-  const index: any[] = (await kv.get(INDEX_KEY)) ?? [];
-  const synced = index.map((t: any) =>
-    t.email === email.toLowerCase()
-      ? { ...t, name: updated.businessInfo?.name ?? t.name, plan: updated.plan ?? t.plan }
-      : t
-  );
-  await kv.set(INDEX_KEY, synced);
+  const patch: any = {};
+  if (body.businessInfo !== undefined) patch.business_info = body.businessInfo;
+  if (body.config !== undefined) patch.config = body.config;
+  if (body.menu !== undefined) patch.menu = body.menu;
+  if (body.customers !== undefined) patch.customers = body.customers;
+  if (body.staff !== undefined) patch.staff = body.staff;
 
-  const { passwordHash: _, ...safe } = updated;
-  return c.json(safe);
+  const { data: updated, error: updateError } = await supabase
+    .from("tenants")
+    .update(patch)
+    .eq("email", email)
+    .select("id, email, business_info, config, menu, customers, staff, created_at")
+    .single();
+  if (updateError) return c.json({ error: updateError.message }, 400);
+
+  return c.json(toTenantResponse(updated, []));
 });
 
 // ── VENUE: add sale ───────────────────────────────────────────────────────────
 app.post("/make-server-b88a7963/tenant/:email/sale", async (c) => {
-  const email = decodeURIComponent(c.req.param("email"));
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const sale = await c.req.json();
-  const sales: any[] = (await kv.get(salesKey(email))) ?? [];
-  sales.unshift({ ...sale, savedAt: new Date().toISOString() });
-  if (sales.length > 500) sales.splice(500);
-  await kv.set(salesKey(email), sales);
+  const supabase = db();
+  const { error } = await supabase.from("sales").insert({
+    id: crypto.randomUUID(),
+    tenant_email: email,
+    sale,
+  });
+  if (error) return c.json({ error: error.message }, 400);
+
+  // Keep only the latest 500 sales per tenant.
+  const { data: toTrim, error: trimReadError } = await supabase
+    .from("sales")
+    .select("id")
+    .eq("tenant_email", email)
+    .order("saved_at", { ascending: false })
+    .range(500, 2000);
+  if (trimReadError) return c.json({ error: trimReadError.message }, 400);
+  const staleIds = (toTrim ?? []).map((row: any) => row.id);
+  if (staleIds.length) {
+    const { error: trimError } = await supabase.from("sales").delete().in("id", staleIds);
+    if (trimError) return c.json({ error: trimError.message }, 400);
+  }
+
   return c.json({ ok: true });
 });
 
 // ── VENUE: get sales ──────────────────────────────────────────────────────────
 app.get("/make-server-b88a7963/tenant/:email/sales", async (c) => {
-  const email = decodeURIComponent(c.req.param("email"));
-  const sales = (await kv.get(salesKey(email))) ?? [];
-  return c.json(sales);
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const supabase = db();
+  const { data, error } = await supabase
+    .from("sales")
+    .select("sale, saved_at")
+    .eq("tenant_email", email)
+    .order("saved_at", { ascending: false })
+    .limit(500);
+  if (error) return c.json({ error: error.message }, 400);
+  return c.json((data ?? []).map((row: any) => ({ ...(row.sale ?? {}), savedAt: row.saved_at })));
 });
 
 // ── Default config ────────────────────────────────────────────────────────────
