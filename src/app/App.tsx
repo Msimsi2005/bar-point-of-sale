@@ -31,6 +31,20 @@ interface CategoryConfig { name: string; enabled: boolean; }
 interface Currency { code: string; symbol: string; name: string; rate: number; enabled: boolean; }
 interface PaymentMethod { id: string; name: string; icon: string; enabled: boolean; custom?: boolean; }
 
+interface PersistedPosTab {
+  id: string;
+  name: string;
+  orders: OrderItem[];
+  opened: string;
+  customerId?: string;
+  prepaid?: number;
+}
+
+interface PersistedPosState {
+  tabs: PersistedPosTab[];
+  activeTabId: string | null;
+}
+
 interface TenantConfig {
   defaultCurrencyCode: string;
   currencies: Currency[];
@@ -38,6 +52,7 @@ interface TenantConfig {
   categories: CategoryConfig[];
   vatEnabled: boolean;
   vatRate: number;
+  posState?: PersistedPosState;
 }
 
 interface BusinessInfo {
@@ -110,6 +125,50 @@ let _seq = 300;
 function uid() { return `id_${++_seq}`; }
 function calcTax(sub: number, cfg: TenantConfig) { return cfg.vatEnabled ? sub * (cfg.vatRate / 100) : 0; }
 
+function asBool(value: unknown, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const lower = value.toLowerCase().trim();
+    if (lower === "true") return true;
+    if (lower === "false") return false;
+  }
+  if (typeof value === "number") return value === 1;
+  return fallback;
+}
+
+function serializeTabs(tabs: Tab[]): PersistedPosTab[] {
+  return tabs.map((tab) => ({
+    id: tab.id,
+    name: tab.name,
+    orders: tab.orders,
+    opened: tab.opened.toISOString(),
+    customerId: tab.customerId,
+    prepaid: tab.prepaid,
+  }));
+}
+
+function hydrateTabs(rawTabs: unknown): Tab[] {
+  if (!Array.isArray(rawTabs)) return [];
+
+  return rawTabs
+    .map((raw) => {
+      const tab = raw as Partial<PersistedPosTab>;
+      if (!tab.id || !tab.name || !Array.isArray(tab.orders)) return null;
+      const openedDate = tab.opened ? new Date(tab.opened) : new Date();
+      const opened = Number.isNaN(openedDate.getTime()) ? new Date() : openedDate;
+
+      return {
+        id: tab.id,
+        name: tab.name,
+        orders: tab.orders,
+        opened,
+        customerId: tab.customerId,
+        prepaid: typeof tab.prepaid === "number" ? tab.prepaid : undefined,
+      } as Tab;
+    })
+    .filter((tab): tab is Tab => tab !== null);
+}
+
 // Convert API row → Tenant
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function rowToTenant(row: any): Tenant {
@@ -121,13 +180,30 @@ function rowToTenant(row: any): Tenant {
     categories: Array.isArray(rawConfig.categories) ? rawConfig.categories : makeConfig().categories,
   });
 
+  const normalizedConfig: TenantConfig = {
+    ...mergedConfig,
+    currencies: mergedConfig.currencies.map((c) => ({
+      ...c,
+      enabled: asBool(c.enabled, true),
+    })),
+    paymentMethods: mergedConfig.paymentMethods.map((m) => ({
+      ...m,
+      enabled: asBool(m.enabled, true),
+      custom: asBool(m.custom, false),
+    })),
+    categories: mergedConfig.categories.map((cat) => ({
+      ...cat,
+      enabled: asBool(cat.enabled, true),
+    })),
+  };
+
   return {
     id: row.id,
     email: row.email,
     password: "",
     plan: row.plan ?? "starter",
     businessInfo: row.businessInfo ?? row.business_info ?? { name: "", logo: null, address: "", phone: "", email: row.email, website: "", regNumber: "", vatNumber: "" },
-    config: mergedConfig,
+    config: normalizedConfig,
     menu: (row.menu ?? []).map((m: any) => ({ ...m })),
     sales: (row.sales ?? []).map((s: any) => ({ ...s, timestamp: new Date(s.timestamp ?? s.savedAt ?? Date.now()) })),
     customers: (row.customers ?? []).map((c: any) => ({ id: c.id, name: c.name, email: c.email ?? "", phone: c.phone ?? "", totalSpent: c.total_spent ?? c.totalSpent ?? 0, visits: c.visits ?? 0, notes: c.notes ?? "" })),
@@ -749,9 +825,19 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
   const { config } = tenant;
   const enabledMethods = config.paymentMethods.filter((m) => m.enabled);
   const enabledCurrencies = config.currencies.filter((c) => c.enabled);
-  const [method, setMethod] = useState(enabledMethods[0]?.id ?? "cash");
+  const [method, setMethod] = useState(enabledMethods[0]?.id ?? "");
   const [currencyCode, setCurrencyCode] = useState(config.defaultCurrencyCode);
   const [cashInput, setCashInput] = useState(tab.prepaid ? String(tab.prepaid) : "");
+
+  useEffect(() => {
+    if (!enabledMethods.length) {
+      setMethod("");
+      return;
+    }
+    if (!enabledMethods.some((m) => m.id === method)) {
+      setMethod(enabledMethods[0].id);
+    }
+  }, [enabledMethods, method]);
 
   const currency = enabledCurrencies.find((c) => c.code === currencyCode) ?? enabledCurrencies[0];
   const subtotal = calcSubtotal(tab.orders);
@@ -761,7 +847,7 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
   const cashAmount = parseFloat(cashInput) || 0;
   const change = cashAmount - totalConverted;
   const isCash = method === "cash";
-  const canCharge = !isCash || cashAmount >= totalConverted;
+  const canCharge = enabledMethods.length > 0 && (!isCash || cashAmount >= totalConverted);
 
   function handleCharge() {
     const sale: SaleRecord = {
@@ -805,9 +891,15 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
           )}
           <div className="px-6 mb-4">
             <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Payment Method</p>
-            <div className="grid grid-cols-2 gap-1.5">
-              {enabledMethods.map((m) => { const Icon = PAYMENT_ICONS[m.icon] ?? CreditCard; return <button key={m.id} onClick={() => setMethod(m.id)} className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold transition-all ${method === m.id ? "bg-primary text-primary-foreground" : "bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}><Icon size={14} /><span className="truncate">{m.name}</span></button>; })}
-            </div>
+            {enabledMethods.length === 0 ? (
+              <div className="rounded-lg border border-red-900/30 bg-red-900/10 px-3 py-2 text-xs text-red-300">
+                No payment methods are enabled. Ask admin to enable at least one in Admin - Payments.
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-1.5">
+                {enabledMethods.map((m) => { const Icon = PAYMENT_ICONS[m.icon] ?? CreditCard; return <button key={m.id} onClick={() => setMethod(m.id)} className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold transition-all ${method === m.id ? "bg-primary text-primary-foreground" : "bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}><Icon size={14} /><span className="truncate">{m.name}</span></button>; })}
+              </div>
+            )}
           </div>
           {isCash && (
             <div className="px-6 mb-4">
@@ -1293,14 +1385,51 @@ function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; t
 let _tabSeq = 10;
 
 function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, onClient, onLogout }: { tenant: Tenant; staffId: string; onTenantChange: (t: Tenant) => void; onSalePersisted: (sale: SaleRecord, updated: Tenant) => void; onAdmin: () => void; onClient: () => void; onLogout: () => void; }) {
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [tabs, setTabs] = useState<Tab[]>(() => hydrateTabs(tenant.config.posState?.tabs));
+  const [activeTabId, setActiveTabId] = useState<string | null>(() => tenant.config.posState?.activeTabId ?? null);
   const [activeCategory, setActiveCategory] = useState("All");
   const [payingTab, setPayingTab] = useState<Tab | null>(null);
   const [showNewTab, setShowNewTab] = useState(false);
   const [pendingSale, setPendingSale] = useState<SaleRecord | null>(null);
   const [now, setNow] = useState(new Date());
+  const tenantRef = useRef(tenant);
   useEffect(() => { const id = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(id); }, []);
+
+  useEffect(() => {
+    tenantRef.current = tenant;
+  }, [tenant]);
+
+  useEffect(() => {
+    const restoredTabs = hydrateTabs(tenant.config.posState?.tabs);
+    const restoredActive = tenant.config.posState?.activeTabId ?? null;
+    setTabs(restoredTabs);
+    setActiveTabId(restoredActive && restoredTabs.some((tab) => tab.id === restoredActive) ? restoredActive : restoredTabs[0]?.id ?? null);
+  }, [tenant.id]);
+
+  useEffect(() => {
+    const maxTabSeq = tabs.reduce((max, tab) => {
+      const match = /^t(\d+)$/.exec(tab.id);
+      const seq = match ? Number(match[1]) : 0;
+      return Math.max(max, seq);
+    }, 0);
+    if (maxTabSeq > _tabSeq) _tabSeq = maxTabSeq;
+  }, [tabs]);
+
+  useEffect(() => {
+    const normalizedActiveTabId = activeTabId && tabs.some((tab) => tab.id === activeTabId) ? activeTabId : null;
+    const nextPosState: PersistedPosState = { tabs: serializeTabs(tabs), activeTabId: normalizedActiveTabId };
+    const currentPosState = tenantRef.current.config.posState ?? { tabs: [], activeTabId: null };
+
+    if (JSON.stringify(currentPosState) === JSON.stringify(nextPosState)) return;
+
+    onTenantChange({
+      ...tenantRef.current,
+      config: {
+        ...tenantRef.current.config,
+        posState: nextPosState,
+      },
+    });
+  }, [tabs, activeTabId, onTenantChange]);
 
   const { config, menu } = tenant;
   const staff = tenant.staff.find((s) => s.id === staffId);
@@ -1527,6 +1656,16 @@ export default function App() {
   const [adminToken, setAdminToken] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const persistTenantSnapshot = useCallback((snapshot: Tenant) => {
+    apiSaveTenant(snapshot.email, {
+      businessInfo: snapshot.businessInfo,
+      config: snapshot.config,
+      menu: snapshot.menu,
+      staff: snapshot.staff,
+      customers: snapshot.customers,
+    }).catch(console.error);
+  }, []);
+
   const verifyBackend = useCallback(async () => {
     setBackendStatus("checking");
     setBackendMessage("Connecting to Supabase API...");
@@ -1572,6 +1711,13 @@ export default function App() {
   }
 
   function handleVenueLogout() {
+    if (tenant) {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      persistTenantSnapshot(tenant);
+    }
     setTenant(null);
     setSession(null);
     setStaffConfirmed(false);
@@ -1593,11 +1739,7 @@ export default function App() {
     setTenant(updated);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      apiSaveTenant(updated.email, {
-        businessInfo: updated.businessInfo,
-        config: updated.config, menu: updated.menu,
-        staff: updated.staff, customers: updated.customers,
-      }).catch(console.error);
+      persistTenantSnapshot(updated);
     }, 1500);
   }
 
