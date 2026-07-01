@@ -8,7 +8,7 @@ const app = new Hono();
 app.use("*", logger(console.log));
 app.use("/*", cors({
   origin: "*",
-  allowHeaders: ["Content-Type", "Authorization", "X-Superadmin-Token"],
+  allowHeaders: ["Content-Type", "Authorization", "X-Superadmin-Token", "X-Tenant-Token"],
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   exposeHeaders: ["Content-Length"],
   maxAge: 600,
@@ -53,6 +53,58 @@ function normalizeEmail(email: string) {
   return email.toLowerCase().trim();
 }
 
+function base64UrlEncode(value: string) {
+  return btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value: string) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  return atob(padded);
+}
+
+async function signTokenPayload(payloadB64: string) {
+  const secret = Deno.env.get("TENANT_TOKEN_SECRET") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "fallback-tenant-secret";
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payloadB64));
+  const bytes = String.fromCharCode(...new Uint8Array(sig));
+  return base64UrlEncode(bytes);
+}
+
+async function createTenantToken(email: string) {
+  const payload = JSON.stringify({
+    email,
+    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7),
+  });
+  const payloadB64 = base64UrlEncode(payload);
+  const sig = await signTokenPayload(payloadB64);
+  return `${payloadB64}.${sig}`;
+}
+
+async function verifyTenantToken(token: string, email: string) {
+  const parts = token.split(".");
+  if (parts.length !== 2) return false;
+  const [payloadB64, sig] = parts;
+  const expectedSig = await signTokenPayload(payloadB64);
+  if (expectedSig !== sig) return false;
+
+  try {
+    const payload = JSON.parse(base64UrlDecode(payloadB64));
+    if (!payload?.email || !payload?.exp) return false;
+    if (normalizeEmail(String(payload.email)) !== normalizeEmail(email)) return false;
+    if (Math.floor(Date.now() / 1000) > Number(payload.exp)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function toTenantSummary(row: any) {
   return {
     email: row.email,
@@ -61,10 +113,11 @@ function toTenantSummary(row: any) {
   };
 }
 
-function toTenantResponse(row: any, sales: any[]) {
+function toTenantResponse(row: any, sales: any[], tenantToken?: string) {
   return {
     id: row.id,
     email: row.email,
+    tenantToken,
     businessInfo: row.business_info ?? {},
     config: row.config ?? defaultConfig(),
     menu: row.menu ?? [],
@@ -74,6 +127,19 @@ function toTenantResponse(row: any, sales: any[]) {
     sales,
   };
 }
+
+app.use("/server/tenant/*", async (c, next) => {
+  const match = /^\/server\/tenant\/([^/]+)/.exec(c.req.path);
+  const email = normalizeEmail(decodeURIComponent(match?.[1] ?? ""));
+  const auth = c.req.header("Authorization") ?? "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const headerToken = c.req.header("X-Tenant-Token") ?? "";
+  const token = headerToken || bearer;
+  const allowed = token ? await verifyTenantToken(token, email) : false;
+
+  if (!allowed) return c.json({ error: "Unauthorized tenant access" }, 401);
+  await next();
+});
 
 // ── SUPERADMIN: login ────────────────────────────────────────────────────────
 app.post("/server/admin/login", async (c) => {
@@ -196,7 +262,8 @@ app.post("/server/auth/login", async (c) => {
   if (salesError) return c.json({ error: salesError.message }, 400);
 
   const sales = (salesRows ?? []).map((row: any) => ({ ...(row.sale ?? {}), savedAt: row.saved_at }));
-  return c.json(toTenantResponse(tenant, sales));
+  const tenantToken = await createTenantToken(normalizedEmail);
+  return c.json(toTenantResponse(tenant, sales, tenantToken));
 });
 
 // ── VENUE: get tenant ─────────────────────────────────────────────────────────

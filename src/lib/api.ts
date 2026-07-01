@@ -47,20 +47,20 @@ export async function apiLogin(email: string, password: string) {
   return call("/auth/login", "POST", { email, password });
 }
 
-export async function apiGetTenant(email: string) {
-  return call(`/tenant/${encodeURIComponent(email)}`);
+export async function apiGetTenant(email: string, tenantToken: string) {
+  return call(`/tenant/${encodeURIComponent(email)}`, "GET", undefined, tenantToken);
 }
 
-export async function apiSaveTenant(email: string, patch: object) {
-  return call(`/tenant/${encodeURIComponent(email)}`, "PUT", patch);
+export async function apiSaveTenant(email: string, patch: object, tenantToken: string) {
+  return call(`/tenant/${encodeURIComponent(email)}`, "PUT", patch, tenantToken);
 }
 
-export async function apiAddSale(email: string, sale: object) {
-  return call(`/tenant/${encodeURIComponent(email)}/sale`, "POST", sale);
+export async function apiAddSale(email: string, sale: object, tenantToken: string) {
+  return call(`/tenant/${encodeURIComponent(email)}/sale`, "POST", sale, tenantToken);
 }
 
-export async function apiGetSales(email: string) {
-  return call(`/tenant/${encodeURIComponent(email)}/sales`);
+export async function apiGetSales(email: string, tenantToken: string) {
+  return call(`/tenant/${encodeURIComponent(email)}/sales`, "GET", undefined, tenantToken);
 }
 
 export async function apiExecuteSql(token: string, sql: string) {

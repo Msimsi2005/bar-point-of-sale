@@ -128,6 +128,7 @@ interface SaleRecord {
 
 interface Tenant {
   id: string; email: string; password: string;
+  tenantToken?: string;
   plan: "starter" | "pro" | "enterprise";
   businessInfo: BusinessInfo; config: TenantConfig;
   menu: MenuItem[]; sales: SaleRecord[];
@@ -151,7 +152,7 @@ const CHANGELOG = [
   { version: "2.4.0", date: "15 Jun 2026", notes: ["Multi-currency checkout", "Pre-pay / deposit tabs", "Customer accounts", "VAT toggle per business"] },
   { version: "2.3.1", date: "2 Jun 2026", notes: ["Receipt printing improvements", "Stock limit enforcement", "Category management"] },
   { version: "2.2.0", date: "18 May 2026", notes: ["Client display view", "Sales analytics dashboard", "Custom payment methods"] },
-  { version: "2.1.0", date: "1 May 2026", notes: ["Multi-tenant SaaS launch", "Staff PIN login", "Business branding"] },
+  { version: "2.1.0", date: "1 May 2026", notes: ["Platform launch", "Staff PIN login", "Business branding"] },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,6 +171,26 @@ function fmt(amount: number, cur: Currency) { return `${cur.symbol}${(amount * c
 let _seq = 300;
 function uid() { return `id_${++_seq}`; }
 function calcTax(sub: number, cfg: TenantConfig) { return cfg.vatEnabled ? sub * (cfg.vatRate / 100) : 0; }
+function TenantBrandMark({ businessInfo, size = "md", className = "" }: { businessInfo: BusinessInfo; size?: "sm" | "md" | "lg"; className?: string }) {
+  const sizes = {
+    sm: { image: "h-7", box: "w-7 h-7 rounded-md", text: "text-xs" },
+    md: { image: "h-12", box: "w-12 h-12 rounded-xl", text: "text-xl" },
+    lg: { image: "h-14", box: "w-14 h-14 rounded-xl", text: "text-xl" },
+  } as const;
+
+  const cfg = sizes[size];
+  const initials = businessInfo.name.slice(0, 2).toUpperCase();
+
+  if (businessInfo.logo) {
+    return <img src={businessInfo.logo} alt={`${businessInfo.name} logo`} className={`${cfg.image} object-contain ${className}`.trim()} />;
+  }
+
+  return (
+    <div className={`${cfg.box} bg-primary/20 border border-primary/30 flex items-center justify-center ${className}`.trim()}>
+      <span className={`text-primary font-black ${cfg.text}`} style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{initials}</span>
+    </div>
+  );
+}
 
 function asBool(value: unknown, fallback = false) {
   if (typeof value === "boolean") return value;
@@ -349,6 +370,7 @@ function rowToTenant(row: any): Tenant {
     id: row.id,
     email: row.email,
     password: "",
+    tenantToken: row.tenantToken,
     plan: row.plan ?? "starter",
     businessInfo: row.businessInfo ?? row.business_info ?? { name: "", logo: null, address: "", phone: "", email: row.email, website: "", regNumber: "", vatNumber: "" },
     config: normalizedConfig,
@@ -481,7 +503,7 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
       {/* Hero */}
       <section className="flex-1 flex flex-col items-center justify-center px-8 py-24 text-center max-w-3xl mx-auto">
         <div className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary font-semibold mb-6">
-          <Zap size={11} /> Multi-tenant SaaS · v2.4.0
+          <Zap size={11} /> Cloud POS Platform
         </div>
         <h1 className="text-5xl md:text-6xl font-black text-foreground mb-5 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
           THE POS BUILT FOR<br /><span className="text-primary">BARS & VENUES</span>
@@ -814,7 +836,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
 // VENUE LOGIN (for companies provisioned by superadmin)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant) => void; onBack: () => void; }) {
+function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant, tenantToken?: string) => void; onBack: () => void; }) {
   const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState(""); const [loading, setLoading] = useState(false);
 
@@ -823,7 +845,7 @@ function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant) => void; onBack:
     setLoading(true); setError("");
     try {
       const data = await apiLogin(email.trim(), password);
-      onLogin(rowToTenant(data));
+      onLogin(rowToTenant(data), data.tenantToken);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Invalid email or password");
     } finally { setLoading(false); }
@@ -912,6 +934,7 @@ function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect:
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           {tenant.businessInfo.logo ? <img src={tenant.businessInfo.logo} alt="" className="h-12 mx-auto mb-3 object-contain" /> : <div className="w-12 h-12 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center mx-auto mb-3"><span className="text-primary font-black text-xl" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.slice(0,2).toUpperCase()}</span></div>}
+                    <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
           <h2 className="text-2xl font-black" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.toUpperCase()}</h2>
           <p className="text-sm text-muted-foreground mt-1">Who is working today?</p>
         </div>
@@ -997,6 +1020,7 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
     }
     if (!enabledMethods.some((m) => m.id === method)) {
       setMethod(enabledMethods[0].id);
+            <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
     }
   }, [enabledMethods, method]);
 
@@ -1312,6 +1336,9 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onBack }: { tenant
       <div className="h-screen w-screen flex flex-col bg-background text-foreground" style={{ fontFamily: "'Barlow', sans-serif" }}>
         <header className="flex items-center justify-between px-6 py-3 border-b border-border bg-card/60 shrink-0">
           <div className="flex items-center gap-3">
+            <TenantBrandMark businessInfo={tenant.businessInfo} size="sm" />
+            <span className="hidden sm:block text-sm font-bold tracking-wide" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.toUpperCase()}</span>
+            <span className="text-muted-foreground/30 hidden sm:block">|</span>
             <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"><ArrowLeft size={15} /> POS</button>
           </div>
           <span className="text-[10px] font-bold px-2 py-0.5 rounded border text-muted-foreground border-border" style={{ fontFamily: "'DM Mono', monospace" }}>ACCESS CONTROL</span>
@@ -1331,6 +1358,9 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onBack }: { tenant
     <div className="h-screen w-screen flex flex-col bg-background text-foreground" style={{ fontFamily: "'Barlow', sans-serif" }}>
       <header className="flex items-center justify-between px-6 py-3 border-b border-border bg-card/60 shrink-0">
         <div className="flex items-center gap-3">
+          <TenantBrandMark businessInfo={tenant.businessInfo} size="sm" />
+          <span className="hidden sm:block text-sm font-bold tracking-wide" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.toUpperCase()}</span>
+          <span className="text-muted-foreground/30 hidden sm:block">|</span>
           <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"><ArrowLeft size={15} /> POS</button>
           <span className="text-muted-foreground/30">|</span>
           <span className="text-primary text-sm font-bold tracking-widest" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>ADMIN</span>
@@ -1646,6 +1676,7 @@ function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; t
       <div className="absolute inset-0 opacity-[0.03] pointer-events-none" style={{ backgroundImage: "radial-gradient(circle at 2px 2px, #c8823a 1px, transparent 0)", backgroundSize: "40px 40px" }} />
       <div className="text-center mb-10">
         {tenant.businessInfo.logo ? <img src={tenant.businessInfo.logo} alt="" className="h-14 mx-auto mb-3 object-contain" /> : <div className="w-14 h-14 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center mx-auto mb-3"><span className="text-primary text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.slice(0,2).toUpperCase()}</span></div>}
+          <TenantBrandMark businessInfo={tenant.businessInfo} size="lg" className="mx-auto mb-3" />
         <h1 className="text-4xl font-black tracking-wider" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.toUpperCase()}</h1>
         <p className="text-muted-foreground text-sm mt-1" style={{ fontFamily: "'DM Mono', monospace" }}>{fmtTime(now)}</p>
       </div>
@@ -1786,7 +1817,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-background text-foreground select-none" style={{ fontFamily: "'Barlow', sans-serif" }}>
       <header className="flex items-center justify-between px-5 py-3 border-b border-border bg-card/60 backdrop-blur-sm z-10 shrink-0">
         <div className="flex items-center gap-2.5">
-          {tenant.businessInfo.logo ? <img src={tenant.businessInfo.logo} alt="" className="h-7 object-contain" /> : <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center"><span className="text-primary-foreground text-xs font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.slice(0,2).toUpperCase()}</span></div>}
+          <TenantBrandMark businessInfo={tenant.businessInfo} size="sm" />
           <span className="text-base font-black tracking-wider hidden sm:block" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.toUpperCase()}</span>
         </div>
         <div className="flex items-center gap-2">
@@ -1951,20 +1982,22 @@ export default function App() {
   const [backendMessage, setBackendMessage] = useState("Connecting to Supabase API...");
   const [screen, setScreen] = useState<AppScreen>("landing");
   const [tenant, setTenant] = useState<Tenant | null>(null);
+  const [tenantToken, setTenantToken] = useState<string | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [staffConfirmed, setStaffConfirmed] = useState(false);
   const [adminToken, setAdminToken] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const persistTenantSnapshot = useCallback((snapshot: Tenant) => {
+    if (!tenantToken) return;
     apiSaveTenant(snapshot.email, {
       businessInfo: snapshot.businessInfo,
       config: snapshot.config,
       menu: snapshot.menu,
       staff: snapshot.staff,
       customers: snapshot.customers,
-    }).catch(console.error);
-  }, []);
+    }, tenantToken).catch(console.error);
+  }, [tenantToken]);
 
   const verifyBackend = useCallback(async () => {
     setBackendStatus("checking");
@@ -2002,8 +2035,9 @@ export default function App() {
     verifyBackend();
   }, [verifyBackend]);
 
-  function handleVenueLogin(t: Tenant) {
+  function handleVenueLogin(t: Tenant, token?: string) {
     setTenant(t);
+    setTenantToken(token ?? t.tenantToken ?? null);
     const owner = t.staff.find((s) => s.role === "owner") ?? t.staff[0];
     setSession({ tenantId: t.id, staffId: owner?.id ?? "" });
     setStaffConfirmed(false);
@@ -2019,6 +2053,7 @@ export default function App() {
       persistTenantSnapshot(tenant);
     }
     setTenant(null);
+    setTenantToken(null);
     setSession(null);
     setStaffConfirmed(false);
     setScreen("landing");
@@ -2046,10 +2081,11 @@ export default function App() {
   // Immediate sale persist + customer update
   function handleSalePersisted(sale: SaleRecord, updatedTenant: Tenant) {
     setTenant(updatedTenant);
-    apiAddSale(updatedTenant.email, { ...sale, timestamp: sale.timestamp.toISOString() }).catch(console.error);
+    if (!tenantToken) return;
+    apiAddSale(updatedTenant.email, { ...sale, timestamp: sale.timestamp.toISOString() }, tenantToken).catch(console.error);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      apiSaveTenant(updatedTenant.email, { customers: updatedTenant.customers }).catch(console.error);
+      apiSaveTenant(updatedTenant.email, { customers: updatedTenant.customers }, tenantToken).catch(console.error);
     }, 500);
   }
 
