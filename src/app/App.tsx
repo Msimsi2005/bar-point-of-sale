@@ -137,7 +137,7 @@ interface Tenant {
 }
 
 interface Session { tenantId: string; staffId: string; }
-interface TenantSummary { email: string; name: string; logo?: string | null; createdAt: string; }
+interface TenantSummary { email: string; name: string; logo?: string | null; paused?: boolean; createdAt: string; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -599,6 +599,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
   const [form, setForm] = useState({ email: "", password: "", businessName: "" });
   const [formError, setFormError] = useState(""); const [formLoading, setFormLoading] = useState(false); const [formSuccess, setFormSuccess] = useState("");
   const [deletingEmail, setDeletingEmail] = useState<string | null>(null);
+  const [pausingEmail, setPausingEmail] = useState<string | null>(null);
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
   const [editPw, setEditPw] = useState(""); const [editLoading, setEditLoading] = useState(false);
   const [sqlText, setSqlText] = useState("SELECT email, name, createdAt FROM tenants LIMIT 25;");
@@ -648,6 +649,21 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
       setEditingEmail(null); setEditPw(""); loadTenants();
     } catch (e: unknown) { alert(e instanceof Error ? e instanceof Error ? e.message : "Failed to update" : "Failed to update"); }
     finally { setEditLoading(false); }
+  }
+
+  async function handlePauseToggle(email: string, paused: boolean) {
+    const action = paused ? "pause" : "resume";
+    if (!window.confirm(`${paused ? "Pause" : "Resume"} business \"${email}\"?`)) return;
+    setPausingEmail(email);
+    try {
+      await apiAdminUpdateTenant(token, email, { paused });
+      setFormSuccess(`Business ${email} is now ${action}d.`);
+      loadTenants();
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : "Failed to update business status");
+    } finally {
+      setPausingEmail(null);
+    }
   }
 
   async function runSql() {
@@ -739,6 +755,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-bold text-foreground">{t.name}</p>
+                        {t.paused && <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">PAUSED</span>}
                       </div>
                       <p className="text-xs text-muted-foreground mt-0.5" style={{ fontFamily: "'DM Mono', monospace" }}>{t.email}</p>
                     </div>
@@ -746,6 +763,13 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
                       {t.createdAt ? new Date(t.createdAt).toLocaleDateString("en-ZA", { day: "2-digit", month: "short", year: "numeric" }) : "—"}
                     </p>
                     <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => handlePauseToggle(t.email, !t.paused)}
+                        disabled={pausingEmail === t.email}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${t.paused ? "text-green-300 bg-green-500/10 hover:bg-green-500/20" : "text-amber-300 bg-amber-500/10 hover:bg-amber-500/20"} disabled:opacity-40`}
+                      >
+                        {pausingEmail === t.email ? "Saving..." : t.paused ? "Resume" : "Pause"}
+                      </button>
                       <button
                         onClick={() => { setEditingEmail(editingEmail === t.email ? null : t.email); setEditPw(""); }}
                         className="p-2 rounded-lg text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"

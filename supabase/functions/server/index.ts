@@ -110,6 +110,7 @@ function toTenantSummary(row: any) {
     email: row.email,
     name: row.business_info?.name ?? "",
     logo: row.business_info?.logo ?? null,
+    paused: row.config?.paused === true,
     createdAt: row.created_at ?? new Date().toISOString(),
   };
 }
@@ -158,7 +159,7 @@ app.get("/server/admin/tenants", async (c) => {
   const supabase = db();
   const { data, error } = await supabase
     .from("tenants")
-    .select("email, business_info, created_at")
+    .select("email, business_info, config, created_at")
     .order("created_at", { ascending: false });
   if (error) return c.json({ error: error.message }, 400);
   return c.json((data ?? []).map(toTenantSummary));
@@ -214,12 +215,28 @@ app.patch("/server/admin/tenants/:email", async (c) => {
   const supabase = db();
 
   const body = await c.req.json();
-  if (!body.password) return c.json({ ok: true });
-  const passwordHash = await hashPassword(body.password);
+  const updates: Record<string, unknown> = {};
+
+  if (typeof body.password === "string" && body.password.trim().length > 0) {
+    updates.password_hash = await hashPassword(body.password);
+  }
+
+  if (typeof body.paused === "boolean") {
+    const { data: existing, error: existingError } = await supabase
+      .from("tenants")
+      .select("config")
+      .eq("email", email)
+      .maybeSingle();
+    if (existingError) return c.json({ error: existingError.message }, 400);
+    const currentConfig = existing?.config ?? defaultConfig();
+    updates.config = { ...currentConfig, paused: body.paused };
+  }
+
+  if (Object.keys(updates).length === 0) return c.json({ ok: true });
 
   const { error } = await supabase
     .from("tenants")
-    .update({ password_hash: passwordHash })
+    .update(updates)
     .eq("email", email);
   if (error) return c.json({ error: error.message }, 400);
 
@@ -250,6 +267,10 @@ app.post("/server/auth/login", async (c) => {
     .maybeSingle();
   if (error) return c.json({ error: error.message }, 400);
   if (!tenant) return c.json({ error: "Invalid email or password" }, 401);
+
+  if (tenant.config?.paused === true) {
+    return c.json({ error: "This business is paused. Contact superadmin." }, 403);
+  }
 
   const hash = await hashPassword(password);
   if (hash !== tenant.password_hash) return c.json({ error: "Invalid email or password" }, 401);

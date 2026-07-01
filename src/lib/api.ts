@@ -33,6 +33,7 @@ export async function apiAdminCreateTenant(token: string, data: {
 
 export async function apiAdminUpdateTenant(token: string, email: string, patch: {
   password?: string;
+  paused?: boolean;
 }) {
   return call(`/admin/tenants/${encodeURIComponent(email)}`, "PATCH", patch, undefined, { "X-Superadmin-Token": token });
 }
