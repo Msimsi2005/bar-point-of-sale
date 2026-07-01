@@ -33,10 +33,10 @@ function db() {
 }
 
 // ── Health ──────────────────────────────────────────────────────────────────
-app.get("/make-server-b88a7963/health", (c) => c.json({ status: "ok" }));
+app.get("/health", (c) => c.json({ status: "ok" }));
 
 // ── SQL execution (superadmin only) ───────────────────────────────────────────
-app.post("/make-server-b88a7963/sql", async (c) => {
+app.post("/sql", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
 
   const { sql } = await c.req.json();
@@ -88,7 +88,7 @@ function toTenantResponse(row: any, sales: any[]) {
 }
 
 // ── SUPERADMIN: login ────────────────────────────────────────────────────────
-app.post("/make-server-b88a7963/admin/login", async (c) => {
+app.post("/admin/login", async (c) => {
   const { email, password } = await c.req.json();
   if (email?.toLowerCase().trim() !== SUPERADMIN_EMAIL || password !== SUPERADMIN_PASSWORD) {
     return c.json({ error: "Invalid superadmin credentials" }, 401);
@@ -98,7 +98,7 @@ app.post("/make-server-b88a7963/admin/login", async (c) => {
 });
 
 // ── SUPERADMIN: list all tenants ─────────────────────────────────────────────
-app.get("/make-server-b88a7963/admin/tenants", async (c) => {
+app.get("/admin/tenants", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
   const supabase = db();
   const { data, error } = await supabase
@@ -110,7 +110,7 @@ app.get("/make-server-b88a7963/admin/tenants", async (c) => {
 });
 
 // ── SUPERADMIN: register a company ───────────────────────────────────────────
-app.post("/make-server-b88a7963/admin/tenants", async (c) => {
+app.post("/admin/tenants", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
   const { email, password, businessName } = await c.req.json();
   if (!email || !password || !businessName) return c.json({ error: "Missing fields" }, 400);
@@ -153,7 +153,7 @@ app.post("/make-server-b88a7963/admin/tenants", async (c) => {
 });
 
 // ── SUPERADMIN: update tenant (reset password) ───────────────────────────────
-app.patch("/make-server-b88a7963/admin/tenants/:email", async (c) => {
+app.patch("/admin/tenants/:email", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
@@ -172,7 +172,7 @@ app.patch("/make-server-b88a7963/admin/tenants/:email", async (c) => {
 });
 
 // ── SUPERADMIN: delete a company ─────────────────────────────────────────────
-app.delete("/make-server-b88a7963/admin/tenants/:email", async (c) => {
+app.delete("/admin/tenants/:email", async (c) => {
   if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
@@ -182,7 +182,7 @@ app.delete("/make-server-b88a7963/admin/tenants/:email", async (c) => {
 });
 
 // ── VENUE: login ─────────────────────────────────────────────────────────────
-app.post("/make-server-b88a7963/auth/login", async (c) => {
+app.post("/auth/login", async (c) => {
   const { email, password } = await c.req.json();
   if (!email || !password) return c.json({ error: "Missing fields" }, 400);
 
@@ -212,7 +212,7 @@ app.post("/make-server-b88a7963/auth/login", async (c) => {
 });
 
 // ── VENUE: get tenant ─────────────────────────────────────────────────────────
-app.get("/make-server-b88a7963/tenant/:email", async (c) => {
+app.get("/tenant/:email", async (c) => {
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
   const { data: tenant, error } = await supabase
@@ -236,7 +236,7 @@ app.get("/make-server-b88a7963/tenant/:email", async (c) => {
 });
 
 // ── VENUE: save tenant ────────────────────────────────────────────────────────
-app.put("/make-server-b88a7963/tenant/:email", async (c) => {
+app.put("/tenant/:email", async (c) => {
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
   const { data: existing, error: existingError } = await supabase
@@ -268,7 +268,7 @@ app.put("/make-server-b88a7963/tenant/:email", async (c) => {
 });
 
 // ── VENUE: add sale ───────────────────────────────────────────────────────────
-app.post("/make-server-b88a7963/tenant/:email/sale", async (c) => {
+app.post("/tenant/:email/sale", async (c) => {
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const sale = await c.req.json();
   const supabase = db();
@@ -297,7 +297,7 @@ app.post("/make-server-b88a7963/tenant/:email/sale", async (c) => {
 });
 
 // ── VENUE: get sales ──────────────────────────────────────────────────────────
-app.get("/make-server-b88a7963/tenant/:email/sales", async (c) => {
+app.get("/tenant/:email/sales", async (c) => {
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
   const { data, error } = await supabase

@@ -8,4 +8,10 @@ if (!envSupabaseUrl || !envSupabaseAnonKey) {
 
 export const SUPABASE_URL = envSupabaseUrl;
 export const SUPABASE_ANON_KEY = envSupabaseAnonKey;
-export const API_BASE = envApiBase ?? `${SUPABASE_URL}/functions/v1/server/make-server-b88a7963`;
+
+function normalizeApiBase(raw: string) {
+  const trimmed = raw.replace(/\/+$/, "");
+  return trimmed.replace(/\/make-server-b88a7963$/, "");
+}
+
+export const API_BASE = normalizeApiBase(envApiBase ?? `${SUPABASE_URL}/functions/v1/server`);
