@@ -109,6 +109,7 @@ function toTenantSummary(row: any) {
   return {
     email: row.email,
     name: row.business_info?.name ?? "",
+    logo: row.business_info?.logo ?? null,
     createdAt: row.created_at ?? new Date().toISOString(),
   };
 }

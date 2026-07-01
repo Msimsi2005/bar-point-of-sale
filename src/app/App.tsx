@@ -137,7 +137,7 @@ interface Tenant {
 }
 
 interface Session { tenantId: string; staffId: string; }
-interface TenantSummary { email: string; name: string; createdAt: string; }
+interface TenantSummary { email: string; name: string; logo?: string | null; createdAt: string; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -731,9 +731,11 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
               {tenants.map((t) => (
                 <div key={t.email} className="rounded-xl border border-border bg-card/30 overflow-hidden">
                   <div className="flex items-center gap-4 px-5 py-4">
-                    <div className="w-10 h-10 rounded-xl bg-primary/15 border border-primary/20 flex items-center justify-center shrink-0">
-                      <span className="text-primary font-black text-sm" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{t.name?.slice(0, 2).toUpperCase()}</span>
-                    </div>
+                    <TenantBrandMark
+                      businessInfo={{ name: t.name ?? "", logo: t.logo ?? null, address: "", phone: "", email: t.email, website: "", regNumber: "", vatNumber: "" }}
+                      size="md"
+                      className="shrink-0"
+                    />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-bold text-foreground">{t.name}</p>
@@ -911,6 +913,7 @@ function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect:
       <div className="min-h-screen bg-background flex items-center justify-center px-4" style={{ fontFamily: "'Barlow', sans-serif" }}>
         <div className="w-72 text-center">
           <button onClick={() => { setSelected(null); setPin(""); }} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-8 mx-auto transition-colors"><ArrowLeft size={14} /> Back</button>
+          <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
           <div className="w-14 h-14 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center mx-auto mb-3"><span className="text-primary text-xl font-bold">{selected.name[0]}</span></div>
           <p className="text-lg font-bold mb-1">{selected.name}</p>
           <p className="text-xs text-muted-foreground mb-6 capitalize">{selected.role}</p>
@@ -933,8 +936,7 @@ function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect:
     <div className="min-h-screen bg-background flex items-center justify-center px-4" style={{ fontFamily: "'Barlow', sans-serif" }}>
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          {tenant.businessInfo.logo ? <img src={tenant.businessInfo.logo} alt="" className="h-12 mx-auto mb-3 object-contain" /> : <div className="w-12 h-12 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center mx-auto mb-3"><span className="text-primary font-black text-xl" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.slice(0,2).toUpperCase()}</span></div>}
-                    <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
+          <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
           <h2 className="text-2xl font-black" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.toUpperCase()}</h2>
           <p className="text-sm text-muted-foreground mt-1">Who is working today?</p>
         </div>
@@ -1020,7 +1022,6 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
     }
     if (!enabledMethods.some((m) => m.id === method)) {
       setMethod(enabledMethods[0].id);
-            <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
     }
   }, [enabledMethods, method]);
 
@@ -1675,8 +1676,7 @@ function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; t
       <button onClick={onBack} className="absolute top-4 left-4 flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"><ArrowLeft size={14} /> Back to POS</button>
       <div className="absolute inset-0 opacity-[0.03] pointer-events-none" style={{ backgroundImage: "radial-gradient(circle at 2px 2px, #c8823a 1px, transparent 0)", backgroundSize: "40px 40px" }} />
       <div className="text-center mb-10">
-        {tenant.businessInfo.logo ? <img src={tenant.businessInfo.logo} alt="" className="h-14 mx-auto mb-3 object-contain" /> : <div className="w-14 h-14 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center mx-auto mb-3"><span className="text-primary text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.slice(0,2).toUpperCase()}</span></div>}
-          <TenantBrandMark businessInfo={tenant.businessInfo} size="lg" className="mx-auto mb-3" />
+        <TenantBrandMark businessInfo={tenant.businessInfo} size="lg" className="mx-auto mb-3" />
         <h1 className="text-4xl font-black tracking-wider" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.toUpperCase()}</h1>
         <p className="text-muted-foreground text-sm mt-1" style={{ fontFamily: "'DM Mono', monospace" }}>{fmtTime(now)}</p>
       </div>
