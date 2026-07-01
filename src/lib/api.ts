@@ -1,11 +1,12 @@
 import { API_BASE, SUPABASE_ANON_KEY } from "./supabase";
 
-async function call(path: string, method = "GET", body?: unknown, token?: string) {
+async function call(path: string, method = "GET", body?: unknown, token?: string, extraHeaders?: Record<string, string>) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${token ?? SUPABASE_ANON_KEY}`,
+      ...(extraHeaders ?? {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
@@ -21,23 +22,23 @@ export async function apiAdminLogin(email: string, password: string) {
 }
 
 export async function apiAdminListTenants(token: string) {
-  return call("/admin/tenants", "GET", undefined, token);
+  return call("/admin/tenants", "GET", undefined, undefined, { "X-Superadmin-Token": token });
 }
 
 export async function apiAdminCreateTenant(token: string, data: {
   email: string; password: string; businessName: string;
 }) {
-  return call("/admin/tenants", "POST", data, token);
+  return call("/admin/tenants", "POST", data, undefined, { "X-Superadmin-Token": token });
 }
 
 export async function apiAdminUpdateTenant(token: string, email: string, patch: {
   password?: string;
 }) {
-  return call(`/admin/tenants/${encodeURIComponent(email)}`, "PATCH", patch, token);
+  return call(`/admin/tenants/${encodeURIComponent(email)}`, "PATCH", patch, undefined, { "X-Superadmin-Token": token });
 }
 
 export async function apiAdminDeleteTenant(token: string, email: string) {
-  return call(`/admin/tenants/${encodeURIComponent(email)}`, "DELETE", undefined, token);
+  return call(`/admin/tenants/${encodeURIComponent(email)}`, "DELETE", undefined, undefined, { "X-Superadmin-Token": token });
 }
 
 // ── Venue ────────────────────────────────────────────────────────────────────
@@ -63,5 +64,5 @@ export async function apiGetSales(email: string) {
 }
 
 export async function apiExecuteSql(token: string, sql: string) {
-  return call("/sql", "POST", { sql }, token);
+  return call("/sql", "POST", { sql }, undefined, { "X-Superadmin-Token": token });
 }

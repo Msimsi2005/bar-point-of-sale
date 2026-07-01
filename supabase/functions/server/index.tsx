@@ -8,7 +8,7 @@ const app = new Hono();
 app.use("*", logger(console.log));
 app.use("/*", cors({
   origin: "*",
-  allowHeaders: ["Content-Type", "Authorization"],
+  allowHeaders: ["Content-Type", "Authorization", "X-Superadmin-Token"],
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   exposeHeaders: ["Content-Length"],
   maxAge: 600,
@@ -19,6 +19,8 @@ const SUPERADMIN_PASSWORD = "PourPOS@Admin2026";
 const SUPERADMIN_EMAIL    = "superadmin@pourpos.co.za";
 
 function isSuperAdmin(c: any): boolean {
+  const custom = c.req.header("X-Superadmin-Token") ?? "";
+  if (custom && custom === SUPERADMIN_PASSWORD) return true;
   const auth = c.req.header("Authorization") ?? "";
   const token = auth.replace("Bearer ", "");
   return token === SUPERADMIN_PASSWORD;
