@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  apiLogin, apiSaveTenant, apiAddSale,
+  apiLogin, apiSaveTenant, apiAddSale, apiUpdateTenantCredentials,
   apiAdminLogin, apiAdminListTenants, apiAdminCreateTenant,
   apiAdminUpdateTenant, apiAdminDeleteTenant, apiExecuteSql,
 } from "../lib/api";
@@ -92,6 +92,7 @@ interface TenantConfig {
   currencies: Currency[];
   paymentMethods: PaymentMethod[];
   categories: CategoryConfig[];
+  allowZeroSales: boolean;
   vatEnabled: boolean;
   vatRate: number;
   printers: HardwareDevice[];
@@ -335,6 +336,7 @@ function rowToTenant(row: any): Tenant {
 
   const normalizedConfig: TenantConfig = {
     ...mergedConfig,
+    allowZeroSales: asBool(mergedConfig.allowZeroSales, false),
     currencies: mergedConfig.currencies.map((c) => ({
       ...c,
       enabled: asBool(c.enabled, true),
@@ -398,7 +400,7 @@ function rowToTenant(row: any): Tenant {
 
 function makeConfig(overrides: Partial<TenantConfig> = {}): TenantConfig {
   return {
-    defaultCurrencyCode: "ZAR", vatEnabled: true, vatRate: 15,
+    defaultCurrencyCode: "ZAR", allowZeroSales: false, vatEnabled: true, vatRate: 15,
     currencies: [
       { code: "ZAR", symbol: "R", name: "South African Rand", rate: 1, enabled: true },
       { code: "USD", symbol: "$", name: "US Dollar", rate: 0.054, enabled: true },
@@ -1106,7 +1108,8 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
   const cashAmount = parseFloat(cashInput) || 0;
   const change = cashAmount - totalConverted;
   const isCash = method === "cash";
-  const canCharge = enabledMethods.length > 0 && (!isCash || cashAmount >= totalConverted);
+  const hasChargeableTotal = config.allowZeroSales || total > 0;
+  const canCharge = enabledMethods.length > 0 && hasChargeableTotal && (!isCash || cashAmount >= totalConverted);
 
   function handleCharge() {
     const sale: SaleRecord = {
@@ -1166,6 +1169,13 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
               <input type="number" value={cashInput} onChange={(e) => setCashInput(e.target.value)} placeholder={`${currency?.symbol ?? "R"}0.00`} className="w-full rounded-lg bg-white/5 border border-amber-900/20 px-4 py-3 text-foreground text-lg font-semibold focus:outline-none focus:border-primary/50 transition-colors" style={{ fontFamily: "'DM Mono', monospace" }} />
               {cashAmount >= totalConverted && cashInput && <div className="flex justify-between text-sm mt-2"><span className="text-muted-foreground">Change due</span><span className="text-green-400 font-bold" style={{ fontFamily: "'DM Mono', monospace" }}>{currency?.symbol ?? "R"}{change.toFixed(2)}</span></div>}
               {cashInput && cashAmount < totalConverted && <div className="flex items-center gap-1 text-xs text-red-400 mt-2"><AlertCircle size={12} /> Short by {currency?.symbol ?? "R"}{(totalConverted - cashAmount).toFixed(2)}</div>}
+            </div>
+          )}
+          {!config.allowZeroSales && total <= 0 && (
+            <div className="px-6 mb-4">
+              <div className="rounded-lg border border-red-900/30 bg-red-900/10 px-3 py-2 text-xs text-red-300">
+                Zero-value sales are disabled in settings. Enable them in Admin - System to complete this checkout.
+              </div>
             </div>
           )}
         </div>
@@ -1295,7 +1305,7 @@ function SalesSection({ sales }: { sales: SaleRecord[] }) {
 // ADMIN PANEL
 // ─────────────────────────────────────────────────────────────────────────────
 
-function AdminPanel({ tenant, currentStaffId, onTenantChange, onBack }: { tenant: Tenant; currentStaffId: string; onTenantChange: (t: Tenant) => void; onBack: () => void; }) {
+function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdate, onBack }: { tenant: Tenant; currentStaffId: string; onTenantChange: (t: Tenant) => void; onCredentialsUpdate: (patch: { loginEmail?: string; password?: string; staffId: string; pin?: string; }) => Promise<void>; onBack: () => void; }) {
   const [section, setSection] = useState<AdminSection>("products");
   const [editingProduct, setEditingProduct] = useState<MenuItem | null>(null);
   const [bizSaved, setBizSaved] = useState(false);
@@ -1308,6 +1318,13 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onBack }: { tenant
   const [newScannerName, setNewScannerName] = useState("");
   const [newScannerConnection, setNewScannerConnection] = useState<HardwareDevice["connection"]>("usb");
   const [newScannerTarget, setNewScannerTarget] = useState("");
+  const [loginEmailForm, setLoginEmailForm] = useState(tenant.email);
+  const [newLoginPassword, setNewLoginPassword] = useState("");
+  const [confirmLoginPassword, setConfirmLoginPassword] = useState("");
+  const [myPinForm, setMyPinForm] = useState("");
+  const [credentialsSaving, setCredentialsSaving] = useState(false);
+  const [credentialsError, setCredentialsError] = useState("");
+  const [credentialsSaved, setCredentialsSaved] = useState("");
   const logoRef = useRef<HTMLInputElement>(null);
 
   const { config, businessInfo, menu } = tenant;
@@ -1323,6 +1340,14 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onBack }: { tenant
   useEffect(() => {
     setBizForm({ ...businessInfo });
   }, [businessInfo]);
+
+  useEffect(() => {
+    setLoginEmailForm(tenant.email);
+  }, [tenant.email]);
+
+  useEffect(() => {
+    setMyPinForm(currentStaff?.pin ?? "");
+  }, [currentStaff?.pin]);
 
   function saveProduct() {
     if (!productForm.name.trim() || productForm.price <= 0) return;
@@ -1353,6 +1378,60 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onBack }: { tenant
     update({ businessInfo: next });
     setBizSaved(true);
     setTimeout(() => setBizSaved(false), 2000);
+  }
+
+  async function saveCredentials() {
+    if (!currentStaff) return;
+    const trimmedLoginEmail = loginEmailForm.trim().toLowerCase();
+    const trimmedPassword = newLoginPassword.trim();
+    const pinChanged = myPinForm !== currentStaff.pin;
+    const loginEmailChanged = currentStaff.role === "owner" && trimmedLoginEmail !== tenant.email;
+    const passwordChanged = currentStaff.role === "owner" && trimmedPassword.length > 0;
+
+    setCredentialsError("");
+    setCredentialsSaved("");
+
+    if (!pinChanged && !loginEmailChanged && !passwordChanged) {
+      setCredentialsError("No credential changes to save.");
+      return;
+    }
+
+    if (pinChanged && !/^\d{4}$/.test(myPinForm)) {
+      setCredentialsError("PIN must be exactly 4 digits.");
+      return;
+    }
+
+    if (loginEmailChanged && !trimmedLoginEmail) {
+      setCredentialsError("Login email is required.");
+      return;
+    }
+
+    if (passwordChanged && trimmedPassword.length < 6) {
+      setCredentialsError("Password must be at least 6 characters.");
+      return;
+    }
+
+    if (passwordChanged && trimmedPassword !== confirmLoginPassword.trim()) {
+      setCredentialsError("Password confirmation does not match.");
+      return;
+    }
+
+    setCredentialsSaving(true);
+    try {
+      await onCredentialsUpdate({
+        staffId: currentStaff.id,
+        pin: pinChanged ? myPinForm : undefined,
+        loginEmail: loginEmailChanged ? trimmedLoginEmail : undefined,
+        password: passwordChanged ? trimmedPassword : undefined,
+      });
+      setNewLoginPassword("");
+      setConfirmLoginPassword("");
+      setCredentialsSaved("Access credentials updated.");
+    } catch (e: unknown) {
+      setCredentialsError(e instanceof Error ? e.message : "Failed to update credentials.");
+    } finally {
+      setCredentialsSaving(false);
+    }
   }
 
   const printers = config.printers ?? [];
@@ -1715,6 +1794,64 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onBack }: { tenant
                 </div>
               </div>
               <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
+                <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Admin Access</p>
+                {credentialsError && <div className="flex items-center gap-2 rounded-lg bg-red-900/20 border border-red-900/30 px-3 py-2.5 text-xs text-red-400 mb-3"><AlertCircle size={13} />{credentialsError}</div>}
+                {credentialsSaved && <div className="flex items-center gap-2 rounded-lg bg-green-900/20 border border-green-900/30 px-3 py-2.5 text-xs text-green-400 mb-3"><CheckCircle size={13} />{credentialsSaved}</div>}
+                <div className="space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <div>
+                        <p className="text-sm font-semibold">Your PIN</p>
+                        <p className="text-xs text-muted-foreground">Change the 4-digit PIN used on the staff login screen.</p>
+                      </div>
+                      <span className="text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{currentStaff?.role ?? "staff"}</span>
+                    </div>
+                    <input value={myPinForm} onChange={(e) => { setMyPinForm(e.target.value.replace(/\D/g, "").slice(0, 4)); setCredentialsError(""); setCredentialsSaved(""); }} maxLength={4} placeholder="4-digit PIN" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" style={{ fontFamily: "'DM Mono', monospace" }} />
+                  </div>
+                  <div className="border-t border-border pt-4">
+                    <p className="text-sm font-semibold mb-1">Venue Login</p>
+                    <p className="text-xs text-muted-foreground mb-3">These credentials are used on the venue email/password sign-in screen.</p>
+                    {currentStaff?.role === "owner" ? (
+                      <div className="space-y-3">
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Login Email</label>
+                          <input type="email" value={loginEmailForm} onChange={(e) => { setLoginEmailForm(e.target.value); setCredentialsError(""); setCredentialsSaved(""); }} placeholder="owner@yourvenue.co.za" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">New Password</label>
+                            <input type="password" value={newLoginPassword} onChange={(e) => { setNewLoginPassword(e.target.value); setCredentialsError(""); setCredentialsSaved(""); }} placeholder="Minimum 6 characters" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+                          </div>
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
+                            <input type="password" value={confirmLoginPassword} onChange={(e) => { setConfirmLoginPassword(e.target.value); setCredentialsError(""); setCredentialsSaved(""); }} placeholder="Repeat password" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border border-border bg-white/5 px-3 py-2.5 text-xs text-muted-foreground">
+                        Only the owner account can change the venue login email and password. Managers can still update their own PIN above.
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={saveCredentials} disabled={credentialsSaving || !currentStaff} className="w-full rounded-xl bg-primary text-primary-foreground py-3 text-sm font-bold tracking-widest transition-all hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
+                    {credentialsSaving ? "SAVING ACCESS..." : "SAVE ACCESS CREDENTIALS"}
+                  </button>
+                </div>
+              </div>
+              <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
+                <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Sales Rules</p>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-semibold">Allow Zero Sales</p>
+                    <p className="text-xs text-muted-foreground">Permit checkout when the sale total is R0.00. Turn this off to block zero-value sales.</p>
+                  </div>
+                  <button onClick={() => updateConfig({ allowZeroSales: !config.allowZeroSales })} className={`w-12 h-6 rounded-full relative shrink-0 ${config.allowZeroSales ? "bg-primary" : "bg-white/10"}`}>
+                    <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${config.allowZeroSales ? "left-[26px]" : "left-0.5"}`} />
+                  </button>
+                </div>
+              </div>
+              <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
                 <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Account</p>
                 <div className="space-y-1.5 text-sm">{[["Email",tenant.email],["Member Since",fmtDate(tenant.createdAt)],["Tenant ID",tenant.id]].map(([l,v])=><div key={l} className="flex justify-between"><span className="text-muted-foreground">{l}</span><span style={{ fontFamily: "'DM Mono', monospace" }} className="text-foreground truncate max-w-[60%] text-right">{v}</span></div>)}</div>
               </div>
@@ -1842,20 +1979,37 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
 
   const filtered = activeCategory === "All" ? menu.filter((m) => enabledCats.includes(m.category)) : menu.filter((m) => m.category === activeCategory);
 
+  function getReservedQty(itemId: string, tabsState: Tab[]) {
+    return tabsState.reduce((sum, tab) => sum + tab.orders.reduce((tabSum, order) => order.menuItem.id === itemId ? tabSum + order.qty : tabSum, 0), 0);
+  }
+
+  function getRemainingStock(item: MenuItem, tabsState: Tab[]) {
+    if (item.stock === -1) return -1;
+    return Math.max(item.stock - getReservedQty(item.id, tabsState), 0);
+  }
+
   function addToOrder(item: MenuItem) {
-    if (!permissions.editOrders || !activeTabId || item.stock === 0) return;
-    setTabs((prev) => prev.map((tab) => {
+    if (!permissions.editOrders || !activeTabId) return;
+    setTabs((prev) => {
+      if (getRemainingStock(item, prev) === 0) return prev;
+      return prev.map((tab) => {
       if (tab.id !== activeTabId) return tab;
       const existing = tab.orders.find((o) => o.menuItem.id === item.id);
-      if (item.stock !== -1 && (existing?.qty ?? 0) >= item.stock) return tab;
       if (existing) return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === item.id ? { ...o, qty: o.qty + 1 } : o) };
       return { ...tab, orders: [...tab.orders, { menuItem: item, qty: 1 }] };
-    }));
+      });
+    });
   }
 
   function changeQty(tabId: string, itemId: string, delta: number) {
     if (!permissions.editOrders) return;
-    setTabs((prev) => prev.map((tab) => { if (tab.id !== tabId) return tab; return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === itemId ? { ...o, qty: o.qty + delta } : o).filter((o) => o.qty > 0) }; }));
+    setTabs((prev) => {
+      if (delta > 0) {
+        const item = menu.find((menuItem) => menuItem.id === itemId);
+        if (!item || getRemainingStock(item, prev) === 0) return prev;
+      }
+      return prev.map((tab) => { if (tab.id !== tabId) return tab; return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === itemId ? { ...o, qty: o.qty + delta } : o).filter((o) => o.qty > 0) }; });
+    });
   }
 
   function createTab(name: string, prepaid?: number, customerId?: string) {
@@ -1872,7 +2026,17 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   }
 
   function handlePaymentComplete(sale: SaleRecord) {
-    let updated = { ...tenant, sales: [sale, ...tenant.sales] };
+    const soldQtyByItem = sale.items.reduce<Record<string, number>>((acc, order) => {
+      acc[order.menuItem.id] = (acc[order.menuItem.id] ?? 0) + order.qty;
+      return acc;
+    }, {});
+    const nextMenu = tenant.menu.map((item) => {
+      if (item.stock === -1) return item;
+      const soldQty = soldQtyByItem[item.id] ?? 0;
+      if (!soldQty) return item;
+      return { ...item, stock: Math.max(item.stock - soldQty, 0) };
+    });
+    let updated = { ...tenant, menu: nextMenu, sales: [sale, ...tenant.sales] };
     if (sale.customerId) updated.customers = tenant.customers.map((c) => c.id === sale.customerId ? { ...c, totalSpent: c.totalSpent + sale.total, visits: c.visits + 1 } : c);
     onSalePersisted(sale, updated);
     if (payingTab) closeTabById(payingTab.id);
@@ -1927,21 +2091,21 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
           <div className="flex-1 overflow-y-auto px-4 pt-3 pb-4">
             <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
               {filtered.map((item) => {
-                const oos = item.stock === 0;
+                const remainingStock = getRemainingStock(item, tabs);
+                const oos = item.stock !== -1 && remainingStock === 0;
                 const oqty = activeTab?.orders.find((o) => o.menuItem.id === item.id)?.qty ?? 0;
-                const atLim = item.stock !== -1 && oqty >= item.stock && item.stock > 0;
                 const dis = !activeTabId || oos || !permissions.editOrders;
                 return (
-                  <button key={item.id} onClick={()=>!dis&&!atLim&&addToOrder(item)} disabled={dis||atLim}
-                    className={`group relative text-left rounded-xl border p-3.5 transition-all active:scale-[0.97] ${oos?"border-red-900/30 bg-red-900/5 opacity-50 cursor-not-allowed":dis||atLim?"border-border/50 bg-card/40 opacity-50 cursor-not-allowed":"border-border bg-card hover:border-primary/30 hover:bg-primary/5 cursor-pointer"}`}>
+                  <button key={item.id} onClick={()=>!dis&&addToOrder(item)} disabled={dis}
+                    className={`group relative text-left rounded-xl border p-3.5 transition-all active:scale-[0.97] ${oos?"border-red-500/40 bg-red-950/20 ring-1 ring-red-500/30 cursor-not-allowed":dis?"border-border/50 bg-card/40 opacity-50 cursor-not-allowed":"border-border bg-card hover:border-primary/30 hover:bg-primary/5 cursor-pointer"}`}>
                     {item.popular&&!oos&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-primary/80 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>HOT</span>}
-                    {oos&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-red-400/80 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>OUT</span>}
+                    {oos&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-red-300 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>OUT OF STOCK</span>}
                     {oqty>0&&!oos&&<span className="absolute top-2.5 right-2.5 w-5 h-5 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center">{oqty}</span>}
                     <p className="text-sm font-semibold text-foreground pr-6 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "0.92rem" }}>{item.name}</p>
                     <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-1">{item.description}</p>
                     <div className="flex items-end justify-between mt-2">
                       <p className="text-sm font-bold text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{item.price.toFixed(2)}</p>
-                      {item.stock!==-1&&item.stock>0&&<p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{item.stock} left</p>}
+                      {item.stock!==-1&&<p className={`text-[10px] ${oos?"text-red-300 font-semibold":"text-muted-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{oos?"Out of stock":`${remainingStock} left`}</p>}
                     </div>
                   </button>
                 );
@@ -1973,7 +2137,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                       <div className="flex items-center gap-1 shrink-0">
                         <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Minus size={9} /></button>
                         <span className="text-xs font-bold w-4 text-center" style={{ fontFamily: "'DM Mono', monospace" }}>{o.qty}</span>
-                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
+                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders || (() => { const item = menu.find((menuItem) => menuItem.id === o.menuItem.id); return item ? getRemainingStock(item, tabs) === 0 : true; })()} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
                       </div>
                       <span className="text-xs font-semibold w-12 text-right shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{(o.menuItem.price*o.qty).toFixed(0)}</span>
                     </div>
@@ -2142,6 +2306,18 @@ export default function App() {
     setScreen("landing");
   }
 
+  async function handleTenantCredentialsUpdate(patch: { loginEmail?: string; password?: string; staffId: string; pin?: string; }) {
+    if (!tenant || !tenantToken) throw new Error("You must be logged in to update credentials.");
+    const response = await apiUpdateTenantCredentials(tenant.email, patch, tenantToken);
+    const updatedTenant = rowToTenant(response);
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    setTenant(updatedTenant);
+    setTenantToken(response.tenantToken ?? updatedTenant.tenantToken ?? tenantToken);
+  }
+
   // Debounced save — tenant data changes
   function updateTenant(updated: Tenant) {
     setTenant(updated);
@@ -2158,7 +2334,7 @@ export default function App() {
     apiAddSale(updatedTenant.email, { ...sale, timestamp: sale.timestamp.toISOString() }, tenantToken).catch(console.error);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      apiSaveTenant(updatedTenant.email, { customers: updatedTenant.customers }, tenantToken).catch(console.error);
+      apiSaveTenant(updatedTenant.email, { customers: updatedTenant.customers, menu: updatedTenant.menu }, tenantToken).catch(console.error);
     }, 500);
   }
 
@@ -2197,7 +2373,7 @@ export default function App() {
 
   if (screen === "admin") {
     if (!activePermissions.adminAccess) return <POSView tenant={tenant} staffId={session.staffId} onTenantChange={updateTenant} onSalePersisted={handleSalePersisted} onAdmin={() => undefined} onClient={() => setScreen("client")} onLogout={handleVenueLogout} />;
-    return <AdminPanel tenant={tenant} currentStaffId={session.staffId} onTenantChange={updateTenant} onBack={() => setScreen("pos")} />;
+    return <AdminPanel tenant={tenant} currentStaffId={session.staffId} onTenantChange={updateTenant} onCredentialsUpdate={handleTenantCredentialsUpdate} onBack={() => setScreen("pos")} />;
   }
   if (screen === "client") return <ClientDisplay activeTab={null} tenant={tenant} onBack={() => setScreen("pos")} />;
 

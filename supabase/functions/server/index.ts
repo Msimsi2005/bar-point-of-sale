@@ -9,7 +9,7 @@ app.use("*", logger(console.log));
 app.use("/*", cors({
   origin: "*",
   allowHeaders: ["Content-Type", "Authorization", "X-Superadmin-Token", "X-Tenant-Token"],
-  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   exposeHeaders: ["Content-Length"],
   maxAge: 600,
 }));
@@ -342,6 +342,68 @@ app.put("/server/tenant/:email", async (c) => {
   if (updateError) return c.json({ error: updateError.message }, 400);
 
   return c.json(toTenantResponse(updated, []));
+});
+
+app.patch("/server/tenant/:email/credentials", async (c) => {
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const supabase = db();
+  const { data: existing, error: existingError } = await supabase
+    .from("tenants")
+    .select("id, email, business_info, config, menu, customers, staff, created_at")
+    .eq("email", email)
+    .maybeSingle();
+  if (existingError) return c.json({ error: existingError.message }, 400);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+
+  const body = await c.req.json();
+  const updates: Record<string, unknown> = {};
+  let nextEmail = email;
+
+  if (typeof body.loginEmail === "string") {
+    const normalizedLoginEmail = normalizeEmail(body.loginEmail);
+    if (!normalizedLoginEmail) return c.json({ error: "Login email is required" }, 400);
+    if (normalizedLoginEmail !== email) {
+      const { data: duplicate, error: duplicateError } = await supabase
+        .from("tenants")
+        .select("email")
+        .eq("email", normalizedLoginEmail)
+        .maybeSingle();
+      if (duplicateError) return c.json({ error: duplicateError.message }, 400);
+      if (duplicate) return c.json({ error: "Login email already registered" }, 409);
+      updates.email = normalizedLoginEmail;
+      nextEmail = normalizedLoginEmail;
+    }
+  }
+
+  if (typeof body.password === "string") {
+    const trimmedPassword = body.password.trim();
+    if (trimmedPassword.length > 0) {
+      if (trimmedPassword.length < 6) return c.json({ error: "Password must be at least 6 characters" }, 400);
+      updates.password_hash = await hashPassword(trimmedPassword);
+    }
+  }
+
+  if (typeof body.pin === "string") {
+    if (!/^\d{4}$/.test(body.pin)) return c.json({ error: "PIN must be exactly 4 digits" }, 400);
+    const staffId = typeof body.staffId === "string" ? body.staffId : "";
+    if (!staffId) return c.json({ error: "Staff ID is required to update PIN" }, 400);
+    const staff = Array.isArray(existing.staff) ? existing.staff : [];
+    if (!staff.some((member: any) => member?.id === staffId)) return c.json({ error: "Staff member not found" }, 404);
+    updates.staff = staff.map((member: any) => member?.id === staffId ? { ...member, pin: body.pin } : member);
+  }
+
+  if (Object.keys(updates).length === 0) return c.json({ error: "No credential changes supplied" }, 400);
+
+  const { data: updated, error: updateError } = await supabase
+    .from("tenants")
+    .update(updates)
+    .eq("email", email)
+    .select("id, email, business_info, config, menu, customers, staff, created_at")
+    .single();
+  if (updateError) return c.json({ error: updateError.message }, 400);
+
+  const tenantToken = await createTenantToken(nextEmail);
+  return c.json(toTenantResponse(updated, [], tenantToken));
 });
 
 // ── VENUE: add sale ───────────────────────────────────────────────────────────

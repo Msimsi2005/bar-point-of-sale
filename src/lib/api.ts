@@ -56,6 +56,15 @@ export async function apiSaveTenant(email: string, patch: object, tenantToken: s
   return call(`/tenant/${encodeURIComponent(email)}`, "PUT", patch, tenantToken);
 }
 
+export async function apiUpdateTenantCredentials(email: string, patch: {
+  loginEmail?: string;
+  password?: string;
+  staffId: string;
+  pin?: string;
+}, tenantToken: string) {
+  return call(`/tenant/${encodeURIComponent(email)}/credentials`, "PATCH", patch, tenantToken);
+}
+
 export async function apiAddSale(email: string, sale: object, tenantToken: string) {
   return call(`/tenant/${encodeURIComponent(email)}/sale`, "POST", sale, tenantToken);
 }
