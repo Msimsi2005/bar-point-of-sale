@@ -15,8 +15,8 @@ app.use("/*", cors({
 }));
 
 // ── Superadmin credentials (server-only) ────────────────────────────────────
-const SUPERADMIN_PASSWORD = "PourPOS@Admin2026";
-const SUPERADMIN_EMAIL    = "superadmin@pourpos.co.za";
+const SUPERADMIN_PASSWORD = "mistyWHY2012";
+const SUPERADMIN_EMAIL    = "msizimoyo24gmail.com";
 
 function isSuperAdmin(c: any): boolean {
   const custom = c.req.header("X-Superadmin-Token") ?? "";
