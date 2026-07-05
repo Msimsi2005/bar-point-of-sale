@@ -15,15 +15,120 @@ app.use("/*", cors({
 }));
 
 // ── Superadmin credentials (server-only) ────────────────────────────────────
-const SUPERADMIN_PASSWORD = "mistyWHY2012";
-const SUPERADMIN_EMAIL    = "msizimoyo24@gmail.com";
+const DEFAULT_SUPERADMIN_PASSWORD = "mistyWHY2012";
+const SUPERADMIN_EMAIL = normalizeEmail(Deno.env.get("SUPERADMIN_EMAIL") ?? "msizimoyo24@gmail.com");
+const SUPERADMIN_PASSWORDS = (Deno.env.get("SUPERADMIN_PASSWORDS") ?? Deno.env.get("SUPERADMIN_PASSWORD") ?? DEFAULT_SUPERADMIN_PASSWORD)
+  .split(",")
+  .map((value) => value.trim())
+  .filter((value) => value.length > 0);
+
+const RATE_LIMITS = {
+  globalPerMinute: Number(Deno.env.get("RATE_LIMIT_GLOBAL_PER_MINUTE") ?? 240),
+  loginPerMinute: Number(Deno.env.get("RATE_LIMIT_LOGIN_PER_MINUTE") ?? 15),
+  authMaxFailures: Number(Deno.env.get("AUTH_MAX_FAILURES") ?? 5),
+  authLockMinutes: Number(Deno.env.get("AUTH_LOCK_MINUTES") ?? 15),
+};
+
+type RateBucket = { count: number; windowStart: number };
+const rateBuckets = new Map<string, RateBucket>();
+
+type AuthFailureBucket = { failures: number; lockedUntil: number };
+const authFailures = new Map<string, AuthFailureBucket>();
+
+function getClientIp(c: any): string {
+  return c.req.header("cf-connecting-ip")
+    ?? c.req.header("x-forwarded-for")?.split(",")?.[0]?.trim()
+    ?? c.req.header("x-real-ip")
+    ?? "unknown";
+}
+
+function isValidSuperAdminPassword(token: string): boolean {
+  return SUPERADMIN_PASSWORDS.includes(token);
+}
+
+function checkRateLimit(scope: string, key: string, maxRequests: number, windowMs: number) {
+  const now = Date.now();
+  const bucketKey = `${scope}:${key}`;
+  const bucket = rateBuckets.get(bucketKey);
+
+  if (!bucket || now - bucket.windowStart >= windowMs) {
+    rateBuckets.set(bucketKey, { count: 1, windowStart: now });
+    return { allowed: true, remaining: Math.max(maxRequests - 1, 0), retryAfterMs: 0 };
+  }
+
+  if (bucket.count >= maxRequests) {
+    return { allowed: false, remaining: 0, retryAfterMs: windowMs - (now - bucket.windowStart) };
+  }
+
+  bucket.count += 1;
+  rateBuckets.set(bucketKey, bucket);
+  return { allowed: true, remaining: Math.max(maxRequests - bucket.count, 0), retryAfterMs: 0 };
+}
+
+function authFailureKey(scope: "admin" | "tenant", email: string, ip: string) {
+  return `${scope}:${normalizeEmail(email)}:${ip}`;
+}
+
+function getAuthLockState(key: string) {
+  const entry = authFailures.get(key);
+  if (!entry) return { locked: false, retryAfterMs: 0 };
+
+  const now = Date.now();
+  if (entry.lockedUntil > now) {
+    return { locked: true, retryAfterMs: entry.lockedUntil - now };
+  }
+
+  if (entry.lockedUntil > 0 && entry.lockedUntil <= now) {
+    authFailures.delete(key);
+  }
+
+  return { locked: false, retryAfterMs: 0 };
+}
+
+function recordAuthFailure(key: string) {
+  const current = authFailures.get(key) ?? { failures: 0, lockedUntil: 0 };
+  const failures = current.failures + 1;
+  const shouldLock = failures >= Math.max(1, RATE_LIMITS.authMaxFailures);
+  const lockedUntil = shouldLock ? Date.now() + Math.max(1, RATE_LIMITS.authLockMinutes) * 60_000 : 0;
+  authFailures.set(key, { failures, lockedUntil });
+  return { failures, locked: shouldLock, retryAfterMs: shouldLock ? lockedUntil - Date.now() : 0 };
+}
+
+function clearAuthFailures(key: string) {
+  authFailures.delete(key);
+}
+
+function auditEvent(c: any, event: string, status: "ok" | "denied" | "error", details: Record<string, unknown> = {}) {
+  const payload = {
+    event,
+    status,
+    ip: getClientIp(c),
+    path: c.req.path,
+    method: c.req.method,
+    timestamp: new Date().toISOString(),
+    details,
+  };
+
+  console.log(JSON.stringify({ audit: payload }));
+}
+
+app.use("/server/*", async (c, next) => {
+  const ip = getClientIp(c);
+  const result = checkRateLimit("global", ip, Math.max(1, RATE_LIMITS.globalPerMinute), 60_000);
+  if (!result.allowed) {
+    auditEvent(c, "rate_limit.global", "denied", { retryAfterMs: result.retryAfterMs });
+    c.header("Retry-After", String(Math.ceil(result.retryAfterMs / 1000)));
+    return c.json({ error: "Too many requests. Please retry shortly." }, 429);
+  }
+  await next();
+});
 
 function isSuperAdmin(c: any): boolean {
   const custom = c.req.header("X-Superadmin-Token") ?? "";
-  if (custom && custom === SUPERADMIN_PASSWORD) return true;
+  if (custom && isValidSuperAdminPassword(custom)) return true;
   const auth = c.req.header("Authorization") ?? "";
   const token = auth.replace("Bearer ", "");
-  return token === SUPERADMIN_PASSWORD;
+  return isValidSuperAdminPassword(token);
 }
 
 function db() {
@@ -143,18 +248,47 @@ app.use("/server/tenant/*", async (c, next) => {
   const token = headerToken || bearer;
   const allowed = token ? await verifyTenantToken(token, email) : false;
 
-  if (!allowed) return c.json({ error: "Unauthorized tenant access" }, 401);
+  if (!allowed) {
+    auditEvent(c, "tenant.auth", "denied", { email });
+    return c.json({ error: "Unauthorized tenant access" }, 401);
+  }
   await next();
 });
 
 // ── SUPERADMIN: login ────────────────────────────────────────────────────────
 app.post("/server/admin/login", async (c) => {
+  const ip = getClientIp(c);
+  const loginRate = checkRateLimit("admin_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000);
+  if (!loginRate.allowed) {
+    auditEvent(c, "admin.login", "denied", { reason: "rate_limited", retryAfterMs: loginRate.retryAfterMs });
+    c.header("Retry-After", String(Math.ceil(loginRate.retryAfterMs / 1000)));
+    return c.json({ error: "Too many login attempts. Please retry shortly." }, 429);
+  }
+
   const { email, password } = await c.req.json();
-  if (email?.toLowerCase().trim() !== SUPERADMIN_EMAIL || password !== SUPERADMIN_PASSWORD) {
+  const normalizedEmail = normalizeEmail(String(email ?? ""));
+  const authKey = authFailureKey("admin", normalizedEmail, ip);
+  const lockState = getAuthLockState(authKey);
+  if (lockState.locked) {
+    auditEvent(c, "admin.login", "denied", { reason: "locked", email: normalizedEmail, retryAfterMs: lockState.retryAfterMs });
+    c.header("Retry-After", String(Math.ceil(lockState.retryAfterMs / 1000)));
+    return c.json({ error: "Account temporarily locked due to repeated failures." }, 429);
+  }
+
+  if (normalizedEmail !== SUPERADMIN_EMAIL || !isValidSuperAdminPassword(String(password ?? ""))) {
+    const failure = recordAuthFailure(authKey);
+    auditEvent(c, "admin.login", "denied", { reason: "invalid_credentials", email: normalizedEmail, failures: failure.failures, locked: failure.locked });
+    if (failure.locked) {
+      c.header("Retry-After", String(Math.ceil(failure.retryAfterMs / 1000)));
+      return c.json({ error: "Account temporarily locked due to repeated failures." }, 429);
+    }
     return c.json({ error: "Invalid superadmin credentials" }, 401);
   }
-  // Return the password as the bearer token (simple, server-verified on each request)
-  return c.json({ token: SUPERADMIN_PASSWORD });
+
+  clearAuthFailures(authKey);
+  auditEvent(c, "admin.login", "ok", { email: normalizedEmail });
+  // Return the password that was validated as the bearer token (server re-verifies per request).
+  return c.json({ token: String(password) });
 });
 
 // ── SUPERADMIN: list all tenants ─────────────────────────────────────────────
@@ -299,25 +433,53 @@ app.delete("/server/admin/tenants/:email", async (c) => {
 
 // ── VENUE: login ─────────────────────────────────────────────────────────────
 app.post("/server/auth/login", async (c) => {
+  const ip = getClientIp(c);
+  const loginRate = checkRateLimit("tenant_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000);
+  if (!loginRate.allowed) {
+    auditEvent(c, "tenant.login", "denied", { reason: "rate_limited", retryAfterMs: loginRate.retryAfterMs });
+    c.header("Retry-After", String(Math.ceil(loginRate.retryAfterMs / 1000)));
+    return c.json({ error: "Too many login attempts. Please retry shortly." }, 429);
+  }
+
   const { email, password } = await c.req.json();
   if (!email || !password) return c.json({ error: "Missing fields" }, 400);
 
   const supabase = db();
   const normalizedEmail = normalizeEmail(email);
+  const authKey = authFailureKey("tenant", normalizedEmail, ip);
+  const lockState = getAuthLockState(authKey);
+  if (lockState.locked) {
+    auditEvent(c, "tenant.login", "denied", { reason: "locked", email: normalizedEmail, retryAfterMs: lockState.retryAfterMs });
+    c.header("Retry-After", String(Math.ceil(lockState.retryAfterMs / 1000)));
+    return c.json({ error: "Account temporarily locked due to repeated failures." }, 429);
+  }
+
   const { data: tenant, error } = await supabase
     .from("tenants")
     .select("id, email, password_hash, business_info, config, menu, customers, staff, created_at")
     .eq("email", normalizedEmail)
     .maybeSingle();
   if (error) return c.json({ error: error.message }, 400);
-  if (!tenant) return c.json({ error: "Invalid email or password" }, 401);
+  if (!tenant) {
+    const failure = recordAuthFailure(authKey);
+    auditEvent(c, "tenant.login", "denied", { reason: "invalid_credentials", email: normalizedEmail, failures: failure.failures, locked: failure.locked });
+    return c.json({ error: "Invalid email or password" }, failure.locked ? 429 : 401);
+  }
 
   if (tenant.config?.paused === true) {
+    auditEvent(c, "tenant.login", "denied", { reason: "paused", email: normalizedEmail });
     return c.json({ error: "This business is paused. Contact superadmin." }, 403);
   }
 
   const hash = await hashPassword(password);
-  if (hash !== tenant.password_hash) return c.json({ error: "Invalid email or password" }, 401);
+  if (hash !== tenant.password_hash) {
+    const failure = recordAuthFailure(authKey);
+    auditEvent(c, "tenant.login", "denied", { reason: "invalid_credentials", email: normalizedEmail, failures: failure.failures, locked: failure.locked });
+    return c.json({ error: "Invalid email or password" }, failure.locked ? 429 : 401);
+  }
+
+  clearAuthFailures(authKey);
+  auditEvent(c, "tenant.login", "ok", { email: normalizedEmail });
 
   const { data: salesRows, error: salesError } = await supabase
     .from("sales")

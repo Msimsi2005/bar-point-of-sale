@@ -36,6 +36,18 @@
   - `npx supabase login`
   - `npx supabase functions deploy server --project-ref zqxxiyutriuqjovdknoi`
 
+  ### 3.1) Security secrets for edge function
+
+  Configure these Supabase edge secrets before production launch:
+
+  - `SUPERADMIN_EMAIL`
+  - `SUPERADMIN_PASSWORDS` (comma-separated for rotation, for example `new-pass,old-pass`)
+  - `RATE_LIMIT_GLOBAL_PER_MINUTE`
+  - `RATE_LIMIT_LOGIN_PER_MINUTE`
+  - `AUTH_MAX_FAILURES`
+  - `AUTH_LOCK_MINUTES`
+  - `TENANT_TOKEN_SECRET`
+
   ### 4) Verify backend is online
 
   Open this URL in browser:
@@ -47,6 +59,12 @@
   ### 5) Deploy frontend
 
   Push to GitHub and redeploy Vercel.
+
+  ## Go-Live Operations Docs
+
+  - `guidelines/Security-Hardening.md`
+  - `guidelines/Backup-DR-Runbook.md`
+  - `guidelines/Monitoring-SLA-UAT.md`
 
   Note: `vercel.json` is configured with filesystem handling before SPA fallback so JS assets are served correctly.
   
