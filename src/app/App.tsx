@@ -1256,11 +1256,14 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
 // NEW TAB MODAL (with pre-pay option)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onClose: () => void; onCreate: (name: string, prepaid?: number, customerId?: string) => void; }) {
+export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onClose: () => void; onCreate: (name: string, prepaid?: number, customerId?: string) => void; }) {
   const [name, setName] = useState(""); const [payFirst, setPayFirst] = useState(false);
   const [tabType, setTabType] = useState<"table" | "guest" | "walk-in">("table");
   const [prepaidInput, setPrepaidInput] = useState(""); const [customerId, setCustomerId] = useState("");
   const zarSymbol = tenant.config.currencies.find((c) => c.code === "ZAR")?.symbol ?? "R";
+  const nameInputId = "new-tab-name";
+  const customerSelectId = "new-tab-customer";
+  const prepaidInputId = "new-tab-prepaid";
   const requiresName = tabType !== "walk-in";
 
   const inputLabel = tabType === "table"
@@ -1306,14 +1309,14 @@ function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onClose: (
               ))}
             </div>
           </div>
-          <div><label className="text-xs text-muted-foreground mb-1 block">{inputLabel}</label><input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder={inputPlaceholder} className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-          {tenant.customers.length > 0 && <div><label className="text-xs text-muted-foreground mb-1 block">Link Customer (optional)</label><select value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50"><option value="">— Walk-in —</option>{tenant.customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>}
+          <div><label htmlFor={nameInputId} className="text-xs text-muted-foreground mb-1 block">{inputLabel}</label><input id={nameInputId} autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder={inputPlaceholder} className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+          {tenant.customers.length > 0 && <div><label htmlFor={customerSelectId} className="text-xs text-muted-foreground mb-1 block">Link Customer (optional)</label><select id={customerSelectId} value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50"><option value="">— Walk-in —</option>{tenant.customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>}
           <div className="rounded-xl border border-border bg-white/3 p-3">
             <div className="flex items-center justify-between">
               <div><p className="text-sm font-semibold">Pre-Pay / Deposit</p><p className="text-xs text-muted-foreground">Customer pays upfront; track balance as items are added</p></div>
               <button onClick={() => setPayFirst((v) => !v)} className={`w-11 h-6 rounded-full relative shrink-0 ${payFirst ? "bg-primary" : "bg-white/10"}`}><span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${payFirst ? "left-[22px]" : "left-0.5"}`} /></button>
             </div>
-            {payFirst && <div className="mt-3"><label className="text-xs text-muted-foreground mb-1 block">Amount ({zarSymbol})</label><input type="number" value={prepaidInput} onChange={(e) => setPrepaidInput(e.target.value)} placeholder={`${zarSymbol}0.00`} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" style={{ fontFamily: "'DM Mono', monospace" }} /></div>}
+            {payFirst && <div className="mt-3"><label htmlFor={prepaidInputId} className="text-xs text-muted-foreground mb-1 block">Amount ({zarSymbol})</label><input id={prepaidInputId} type="number" value={prepaidInput} onChange={(e) => setPrepaidInput(e.target.value)} placeholder={`${zarSymbol}0.00`} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" style={{ fontFamily: "'DM Mono', monospace" }} /></div>}
           </div>
         </div>
         <div className="flex gap-2 mt-5">
