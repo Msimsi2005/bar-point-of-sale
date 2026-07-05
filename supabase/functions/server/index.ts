@@ -504,6 +504,67 @@ app.get("/server/tenant/:email/sales", async (c) => {
   return c.json((data ?? []).map((row: any) => ({ ...(row.sale ?? {}), savedAt: row.saved_at })));
 });
 
+// ── VENUE: cleanup test sales (guarded) ─────────────────────────────────────
+app.post("/server/tenant/:email/sales/cleanup", async (c) => {
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const supabase = db();
+
+  const body = await c.req.json().catch(() => ({}));
+  const confirm = String(body?.confirm ?? "");
+  const tabName = String(body?.tabName ?? "").trim();
+  const matchMode = body?.matchMode === "prefix" ? "prefix" : "exact";
+  const requestedMaxDelete = Number(body?.maxDelete ?? 5);
+  const maxDelete = Number.isFinite(requestedMaxDelete)
+    ? Math.min(Math.max(Math.trunc(requestedMaxDelete), 1), 20)
+    : 5;
+
+  if (confirm !== "DELETE_TEST_SALES") {
+    return c.json({ error: "Cleanup requires explicit confirmation token." }, 400);
+  }
+
+  if (!tabName) {
+    return c.json({ error: "tabName is required." }, 400);
+  }
+
+  // Guardrail: this endpoint is only for removing test rows, not production sales.
+  if (!/(test|sync|qa)/i.test(tabName)) {
+    return c.json({ error: "tabName must clearly identify test data (test/sync/qa)." }, 400);
+  }
+
+  const { data, error } = await supabase
+    .from("sales")
+    .select("id, sale, saved_at")
+    .eq("tenant_email", email)
+    .order("saved_at", { ascending: false })
+    .limit(500);
+
+  if (error) return c.json({ error: error.message }, 400);
+
+  const candidates = (data ?? []).filter((row: any) => {
+    const currentTabName = String(row?.sale?.tabName ?? "");
+    return matchMode === "prefix"
+      ? currentTabName.startsWith(tabName)
+      : currentTabName === tabName;
+  });
+
+  const toDelete = candidates.slice(0, maxDelete);
+  const ids = toDelete.map((row: any) => row.id).filter(Boolean);
+
+  if (!ids.length) {
+    return c.json({ ok: true, deletedCount: 0, matchedCount: candidates.length });
+  }
+
+  const { error: deleteError } = await supabase.from("sales").delete().in("id", ids);
+  if (deleteError) return c.json({ error: deleteError.message }, 400);
+
+  return c.json({
+    ok: true,
+    deletedCount: ids.length,
+    matchedCount: candidates.length,
+    deletedIds: ids,
+  });
+});
+
 // ── Default config ────────────────────────────────────────────────────────────
 function defaultConfig() {
   return {

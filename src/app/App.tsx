@@ -602,9 +602,6 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
         <h1 className="text-5xl md:text-6xl font-black text-foreground mb-5 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
           MISTYPOS BUILT FOR<br /><span className="text-primary">BARS & VENUES</span>
         </h1>
-        <p className="text-lg text-muted-foreground mb-10 max-w-xl">
-          Cloud-based point-of-sale for bars, restaurants, and cafés. Each venue gets their own isolated system — managed by your team.
-        </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 w-full max-w-4xl text-left mt-4">
           {features.map(({ icon: Icon, title, desc }) => (
             <div key={title} className="rounded-xl border border-border bg-card/30 p-5">
