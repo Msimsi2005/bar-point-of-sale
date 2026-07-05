@@ -25,7 +25,7 @@
 
   In Supabase SQL Editor, run:
 
-  - `src/lib/001_pourpos_schema.sql`
+  - `src/lib/001_mistypos_schema.sql`
 
   This script creates and upgrades the `tenants` and `sales` tables and includes legacy migration handling.
 

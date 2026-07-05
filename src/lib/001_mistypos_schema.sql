@@ -1,4 +1,4 @@
--- PourPOS — Online Storage Schema (Supabase)
+-- mistypos - Online Storage Schema (Supabase)
 -- Paste and run in Supabase SQL Editor.
 -- This creates all tables required by the current app and migrates old KV data if present.
 

@@ -174,7 +174,7 @@ const PAYMENT_ICONS: Record<string, React.ComponentType<{ size?: number; classNa
 };
 
 const CHANGELOG = [
-  { version: "2.4.0", date: "15 Jun 2026", notes: ["Multi-currency checkout", "Pre-pay / deposit tabs", "Customer accounts", "VAT toggle per business"] },
+  { version: "2.4.0", date: "15 Jun 2026", notes: ["Multi-currency checkout", "Pre-pay / deposit tabs", "Customer accounts", "Customer walk in", "Super admin can see monthly payment due dates", "VAT toggle per business"] },
   { version: "2.3.1", date: "2 Jun 2026", notes: ["Receipt printing improvements", "Stock limit enforcement", "Category management"] },
   { version: "2.2.0", date: "18 May 2026", notes: ["Client display view", "Sales analytics dashboard", "Custom payment methods"] },
   { version: "2.1.0", date: "1 May 2026", notes: ["Platform launch", "Staff PIN login", "Business branding"] },
@@ -558,7 +558,7 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
       <nav className="flex items-center justify-between px-8 py-4 border-b border-border sticky top-0 bg-background/90 backdrop-blur-sm z-20">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center"><span className="text-primary-foreground font-black text-sm" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>P</span></div>
-          <span className="text-lg font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>POURPOS</span>
+          <span className="text-lg font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>mistypos</span>
         </div>
         <button onClick={onVenueLogin} className="rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-white/5 px-4 py-2 transition-colors">
           Venue Access
@@ -571,7 +571,7 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
           <Zap size={11} /> Cloud POS Platform
         </div>
         <h1 className="text-5xl md:text-6xl font-black text-foreground mb-5 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
-          THE POS BUILT FOR<br /><span className="text-primary">BARS & VENUES</span>
+          mistypos BUILT FOR<br /><span className="text-primary">BARS & VENUES</span>
         </h1>
         <p className="text-lg text-muted-foreground mb-10 max-w-xl">
           Cloud-based point-of-sale for bars, restaurants, and cafés. Each venue gets their own isolated system — managed by your team.
@@ -589,7 +589,7 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
 
       {/* Footer — superadmin link (subtle) */}
       <footer className="border-t border-border px-8 py-4 flex items-center justify-between">
-        <p className="text-xs text-muted-foreground/40">© 2026 PourPOS. All rights reserved.</p>
+        <p className="text-xs text-muted-foreground/40">© 2026 mistypos. All rights reserved.</p>
         <button
           onClick={onSuperAdmin}
           className="text-[10px] text-muted-foreground/25 hover:text-muted-foreground transition-colors"
@@ -752,7 +752,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
           <div className="w-8 h-8 rounded-lg bg-primary/20 border border-primary/30 flex items-center justify-center"><Shield size={15} className="text-primary" /></div>
           <div>
             <span className="text-base font-black tracking-wide text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>SUPERADMIN PORTAL</span>
-            <span className="ml-3 text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>POURPOS</span>
+            <span className="ml-3 text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>mistypos</span>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -948,7 +948,7 @@ function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant, tenantToken?: st
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-2.5 mb-8 justify-center">
           <div className="w-9 h-9 rounded-lg bg-primary flex items-center justify-center"><span className="text-primary-foreground font-black text-lg" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>P</span></div>
-          <span className="text-xl font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>POURPOS</span>
+          <span className="text-xl font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>mistypos</span>
         </div>
         <div className="rounded-2xl border border-border bg-card/40 p-7">
           <h2 className="text-xl font-bold mb-1" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Venue Access</h2>
@@ -1258,13 +1258,28 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
 
 function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onClose: () => void; onCreate: (name: string, prepaid?: number, customerId?: string) => void; }) {
   const [name, setName] = useState(""); const [payFirst, setPayFirst] = useState(false);
+  const [tabType, setTabType] = useState<"table" | "guest" | "walk-in">("table");
   const [prepaidInput, setPrepaidInput] = useState(""); const [customerId, setCustomerId] = useState("");
   const zarSymbol = tenant.config.currencies.find((c) => c.code === "ZAR")?.symbol ?? "R";
+  const requiresName = tabType !== "walk-in";
+
+  const inputLabel = tabType === "table"
+    ? "Table *"
+    : tabType === "guest"
+      ? "Guest Name *"
+      : "Walk-In Name";
+
+  const inputPlaceholder = tabType === "table"
+    ? "Table number or label"
+    : tabType === "guest"
+      ? "Guest name"
+      : "Optional customer name";
 
   function submit() {
-    if (!name.trim()) return;
+    if (requiresName && !name.trim()) return;
     const prepaid = payFirst && prepaidInput ? parseFloat(prepaidInput) : undefined;
-    onCreate(name.trim(), prepaid, customerId || undefined);
+    const displayName = name.trim() || "Walk-in";
+    onCreate(displayName, prepaid, customerId || undefined);
   }
 
   return (
@@ -1272,7 +1287,26 @@ function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onClose: (
       <div className="w-96 rounded-2xl border border-amber-900/30 bg-[#161210] shadow-2xl p-6" style={{ fontFamily: "'Barlow', sans-serif" }}>
         <h2 className="text-lg font-bold mb-4" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Open New Tab</h2>
         <div className="space-y-3">
-          <div><label className="text-xs text-muted-foreground mb-1 block">Name / Table *</label><input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Guest name or table number" className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Tab Type</label>
+            <div className="grid grid-cols-3 gap-1.5 rounded-lg border border-border bg-white/5 p-1">
+              {([
+                { id: "table", label: "Table" },
+                { id: "guest", label: "Guest" },
+                { id: "walk-in", label: "Walk-In" },
+              ] as const).map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => setTabType(option.id)}
+                  className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${tabType === option.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div><label className="text-xs text-muted-foreground mb-1 block">{inputLabel}</label><input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder={inputPlaceholder} className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
           {tenant.customers.length > 0 && <div><label className="text-xs text-muted-foreground mb-1 block">Link Customer (optional)</label><select value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50"><option value="">— Walk-in —</option>{tenant.customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>}
           <div className="rounded-xl border border-border bg-white/3 p-3">
             <div className="flex items-center justify-between">
@@ -1284,7 +1318,7 @@ function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onClose: (
         </div>
         <div className="flex gap-2 mt-5">
           <button onClick={onClose} className="flex-1 rounded-lg border border-border py-2.5 text-sm text-muted-foreground hover:text-foreground transition-colors">Cancel</button>
-          <button onClick={submit} disabled={!name.trim()} className="flex-1 rounded-lg bg-primary text-primary-foreground py-2.5 text-sm font-semibold disabled:opacity-30 hover:opacity-90">Open Tab</button>
+          <button onClick={submit} disabled={requiresName && !name.trim()} className="flex-1 rounded-lg bg-primary text-primary-foreground py-2.5 text-sm font-semibold disabled:opacity-30 hover:opacity-90">Open Tab</button>
         </div>
       </div>
     </div>
