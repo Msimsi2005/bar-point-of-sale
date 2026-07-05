@@ -29,11 +29,144 @@ const RATE_LIMITS = {
   authLockMinutes: Number(Deno.env.get("AUTH_LOCK_MINUTES") ?? 15),
 };
 
+const SECURITY_STATE_EMAIL = "__security__@mistypos.local";
+const SECURITY_STATE_NAME = "MISTYPOS SECURITY STATE";
+const SECURITY_STATE_PASSWORD_HASH = "system-security-state";
+
 type RateBucket = { count: number; windowStart: number };
+type RateBucketsMap = Record<string, RateBucket>;
 const rateBuckets = new Map<string, RateBucket>();
 
 type AuthFailureBucket = { failures: number; lockedUntil: number };
+type AuthFailuresMap = Record<string, AuthFailureBucket>;
 const authFailures = new Map<string, AuthFailureBucket>();
+
+type SecurityState = {
+  rateBuckets: RateBucketsMap;
+  authFailures: AuthFailuresMap;
+};
+
+function defaultSecurityState(): SecurityState {
+  return {
+    rateBuckets: {},
+    authFailures: {},
+  };
+}
+
+function sanitizeSecurityState(raw: any): SecurityState {
+  const state = defaultSecurityState();
+  if (!raw || typeof raw !== "object") return state;
+
+  const now = Date.now();
+  const maxBucketAgeMs = 5 * 60_000;
+  const maxAuthAgeMs = Math.max(1, RATE_LIMITS.authLockMinutes) * 60_000 + 5 * 60_000;
+
+  if (raw.rateBuckets && typeof raw.rateBuckets === "object") {
+    for (const [key, value] of Object.entries(raw.rateBuckets)) {
+      if (!value || typeof value !== "object") continue;
+      const count = Number((value as any).count ?? 0);
+      const windowStart = Number((value as any).windowStart ?? 0);
+      if (!Number.isFinite(count) || !Number.isFinite(windowStart)) continue;
+      if (windowStart <= 0 || now - windowStart > maxBucketAgeMs) continue;
+      state.rateBuckets[key] = { count: Math.max(0, Math.trunc(count)), windowStart };
+    }
+  }
+
+  if (raw.authFailures && typeof raw.authFailures === "object") {
+    for (const [key, value] of Object.entries(raw.authFailures)) {
+      if (!value || typeof value !== "object") continue;
+      const failures = Number((value as any).failures ?? 0);
+      const lockedUntil = Number((value as any).lockedUntil ?? 0);
+      if (!Number.isFinite(failures) || !Number.isFinite(lockedUntil)) continue;
+      if (lockedUntil > 0 && lockedUntil < now - maxAuthAgeMs) continue;
+      if (failures <= 0 && lockedUntil <= 0) continue;
+      state.authFailures[key] = { failures: Math.max(0, Math.trunc(failures)), lockedUntil: Math.max(0, Math.trunc(lockedUntil)) };
+    }
+  }
+
+  return state;
+}
+
+function trimSecurityState(state: SecurityState) {
+  const now = Date.now();
+  for (const [key, bucket] of Object.entries(state.rateBuckets)) {
+    if (now - bucket.windowStart > 5 * 60_000 || bucket.count <= 0) delete state.rateBuckets[key];
+  }
+
+  for (const [key, entry] of Object.entries(state.authFailures)) {
+    if (entry.lockedUntil > 0 && entry.lockedUntil <= now) {
+      delete state.authFailures[key];
+      continue;
+    }
+    if (entry.failures <= 0 && entry.lockedUntil <= 0) delete state.authFailures[key];
+  }
+
+  const MAX_KEYS = 2000;
+  const rateKeys = Object.keys(state.rateBuckets);
+  if (rateKeys.length > MAX_KEYS) {
+    const sorted = rateKeys.sort((a, b) => state.rateBuckets[b].windowStart - state.rateBuckets[a].windowStart);
+    for (const key of sorted.slice(MAX_KEYS)) delete state.rateBuckets[key];
+  }
+
+  const authKeys = Object.keys(state.authFailures);
+  if (authKeys.length > MAX_KEYS) {
+    const sorted = authKeys.sort((a, b) => state.authFailures[b].lockedUntil - state.authFailures[a].lockedUntil);
+    for (const key of sorted.slice(MAX_KEYS)) delete state.authFailures[key];
+  }
+}
+
+async function loadSecurityStateRecord(supabase: any) {
+  const { data, error } = await supabase
+    .from("tenants")
+    .select("config")
+    .eq("email", SECURITY_STATE_EMAIL)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+
+  if (!data) {
+    const systemRow = {
+      id: crypto.randomUUID(),
+      email: SECURITY_STATE_EMAIL,
+      password_hash: SECURITY_STATE_PASSWORD_HASH,
+      business_info: {
+        name: SECURITY_STATE_NAME,
+        logo: null,
+        address: "",
+        phone: "",
+        email: SECURITY_STATE_EMAIL,
+        website: "",
+        regNumber: "",
+        vatNumber: "",
+      },
+      config: { securityState: defaultSecurityState() },
+      menu: [],
+      customers: [],
+      staff: [],
+    };
+
+    const { error: createError } = await supabase.from("tenants").insert(systemRow);
+    if (createError) throw new Error(createError.message);
+    return { config: systemRow.config, state: defaultSecurityState() };
+  }
+
+  const config = data?.config ?? {};
+  const state = sanitizeSecurityState(config?.securityState ?? {});
+  return { config, state };
+}
+
+async function saveSecurityStateRecord(supabase: any, config: any, state: SecurityState) {
+  trimSecurityState(state);
+  const nextConfig = {
+    ...(config ?? {}),
+    securityState: state,
+  };
+
+  const { error } = await supabase
+    .from("tenants")
+    .update({ config: nextConfig })
+    .eq("email", SECURITY_STATE_EMAIL);
+  if (error) throw new Error(error.message);
+}
 
 function getClientIp(c: any): string {
   return c.req.header("cf-connecting-ip")
@@ -46,9 +179,26 @@ function isValidSuperAdminPassword(token: string): boolean {
   return SUPERADMIN_PASSWORDS.includes(token);
 }
 
-function checkRateLimit(scope: string, key: string, maxRequests: number, windowMs: number) {
+function checkRateLimit(scope: string, key: string, maxRequests: number, windowMs: number, state?: SecurityState) {
   const now = Date.now();
   const bucketKey = `${scope}:${key}`;
+  if (state) {
+    const bucket = state.rateBuckets[bucketKey];
+
+    if (!bucket || now - bucket.windowStart >= windowMs) {
+      state.rateBuckets[bucketKey] = { count: 1, windowStart: now };
+      return { allowed: true, remaining: Math.max(maxRequests - 1, 0), retryAfterMs: 0 };
+    }
+
+    if (bucket.count >= maxRequests) {
+      return { allowed: false, remaining: 0, retryAfterMs: windowMs - (now - bucket.windowStart) };
+    }
+
+    bucket.count += 1;
+    state.rateBuckets[bucketKey] = bucket;
+    return { allowed: true, remaining: Math.max(maxRequests - bucket.count, 0), retryAfterMs: 0 };
+  }
+
   const bucket = rateBuckets.get(bucketKey);
 
   if (!bucket || now - bucket.windowStart >= windowMs) {
@@ -69,7 +219,23 @@ function authFailureKey(scope: "admin" | "tenant", email: string, ip: string) {
   return `${scope}:${normalizeEmail(email)}:${ip}`;
 }
 
-function getAuthLockState(key: string) {
+function getAuthLockState(key: string, state?: SecurityState) {
+  if (state) {
+    const entry = state.authFailures[key];
+    if (!entry) return { locked: false, retryAfterMs: 0 };
+
+    const now = Date.now();
+    if (entry.lockedUntil > now) {
+      return { locked: true, retryAfterMs: entry.lockedUntil - now };
+    }
+
+    if (entry.lockedUntil > 0 && entry.lockedUntil <= now) {
+      delete state.authFailures[key];
+    }
+
+    return { locked: false, retryAfterMs: 0 };
+  }
+
   const entry = authFailures.get(key);
   if (!entry) return { locked: false, retryAfterMs: 0 };
 
@@ -85,7 +251,16 @@ function getAuthLockState(key: string) {
   return { locked: false, retryAfterMs: 0 };
 }
 
-function recordAuthFailure(key: string) {
+function recordAuthFailure(key: string, state?: SecurityState) {
+  if (state) {
+    const current = state.authFailures[key] ?? { failures: 0, lockedUntil: 0 };
+    const failures = current.failures + 1;
+    const shouldLock = failures >= Math.max(1, RATE_LIMITS.authMaxFailures);
+    const lockedUntil = shouldLock ? Date.now() + Math.max(1, RATE_LIMITS.authLockMinutes) * 60_000 : 0;
+    state.authFailures[key] = { failures, lockedUntil };
+    return { failures, locked: shouldLock, retryAfterMs: shouldLock ? lockedUntil - Date.now() : 0 };
+  }
+
   const current = authFailures.get(key) ?? { failures: 0, lockedUntil: 0 };
   const failures = current.failures + 1;
   const shouldLock = failures >= Math.max(1, RATE_LIMITS.authMaxFailures);
@@ -94,7 +269,11 @@ function recordAuthFailure(key: string) {
   return { failures, locked: shouldLock, retryAfterMs: shouldLock ? lockedUntil - Date.now() : 0 };
 }
 
-function clearAuthFailures(key: string) {
+function clearAuthFailures(key: string, state?: SecurityState) {
+  if (state) {
+    delete state.authFailures[key];
+    return;
+  }
   authFailures.delete(key);
 }
 
@@ -257,8 +436,21 @@ app.use("/server/tenant/*", async (c, next) => {
 
 // ── SUPERADMIN: login ────────────────────────────────────────────────────────
 app.post("/server/admin/login", async (c) => {
+  const supabase = db();
+  let securityRecord: { config: any; state: SecurityState };
+  try {
+    securityRecord = await loadSecurityStateRecord(supabase);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to load security state" }, 500);
+  }
+
   const ip = getClientIp(c);
-  const loginRate = checkRateLimit("admin_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000);
+  const loginRate = checkRateLimit("admin_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000, securityRecord.state);
+  try {
+    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  }
   if (!loginRate.allowed) {
     auditEvent(c, "admin.login", "denied", { reason: "rate_limited", retryAfterMs: loginRate.retryAfterMs });
     c.header("Retry-After", String(Math.ceil(loginRate.retryAfterMs / 1000)));
@@ -268,7 +460,7 @@ app.post("/server/admin/login", async (c) => {
   const { email, password } = await c.req.json();
   const normalizedEmail = normalizeEmail(String(email ?? ""));
   const authKey = authFailureKey("admin", normalizedEmail, ip);
-  const lockState = getAuthLockState(authKey);
+  const lockState = getAuthLockState(authKey, securityRecord.state);
   if (lockState.locked) {
     auditEvent(c, "admin.login", "denied", { reason: "locked", email: normalizedEmail, retryAfterMs: lockState.retryAfterMs });
     c.header("Retry-After", String(Math.ceil(lockState.retryAfterMs / 1000)));
@@ -276,7 +468,12 @@ app.post("/server/admin/login", async (c) => {
   }
 
   if (normalizedEmail !== SUPERADMIN_EMAIL || !isValidSuperAdminPassword(String(password ?? ""))) {
-    const failure = recordAuthFailure(authKey);
+    const failure = recordAuthFailure(authKey, securityRecord.state);
+    try {
+      await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+    }
     auditEvent(c, "admin.login", "denied", { reason: "invalid_credentials", email: normalizedEmail, failures: failure.failures, locked: failure.locked });
     if (failure.locked) {
       c.header("Retry-After", String(Math.ceil(failure.retryAfterMs / 1000)));
@@ -285,7 +482,12 @@ app.post("/server/admin/login", async (c) => {
     return c.json({ error: "Invalid superadmin credentials" }, 401);
   }
 
-  clearAuthFailures(authKey);
+  clearAuthFailures(authKey, securityRecord.state);
+  try {
+    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  }
   auditEvent(c, "admin.login", "ok", { email: normalizedEmail });
   // Return the password that was validated as the bearer token (server re-verifies per request).
   return c.json({ token: String(password) });
@@ -298,6 +500,7 @@ app.get("/server/admin/tenants", async (c) => {
   const { data, error } = await supabase
     .from("tenants")
     .select("email, business_info, config, created_at")
+    .neq("email", SECURITY_STATE_EMAIL)
     .order("created_at", { ascending: false });
   if (error) return c.json({ error: error.message }, 400);
   return c.json((data ?? []).map(toTenantSummary));
@@ -433,8 +636,21 @@ app.delete("/server/admin/tenants/:email", async (c) => {
 
 // ── VENUE: login ─────────────────────────────────────────────────────────────
 app.post("/server/auth/login", async (c) => {
+  const supabase = db();
+  let securityRecord: { config: any; state: SecurityState };
+  try {
+    securityRecord = await loadSecurityStateRecord(supabase);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to load security state" }, 500);
+  }
+
   const ip = getClientIp(c);
-  const loginRate = checkRateLimit("tenant_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000);
+  const loginRate = checkRateLimit("tenant_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000, securityRecord.state);
+  try {
+    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  }
   if (!loginRate.allowed) {
     auditEvent(c, "tenant.login", "denied", { reason: "rate_limited", retryAfterMs: loginRate.retryAfterMs });
     c.header("Retry-After", String(Math.ceil(loginRate.retryAfterMs / 1000)));
@@ -444,10 +660,10 @@ app.post("/server/auth/login", async (c) => {
   const { email, password } = await c.req.json();
   if (!email || !password) return c.json({ error: "Missing fields" }, 400);
 
-  const supabase = db();
   const normalizedEmail = normalizeEmail(email);
+  if (normalizedEmail === SECURITY_STATE_EMAIL) return c.json({ error: "Invalid email or password" }, 401);
   const authKey = authFailureKey("tenant", normalizedEmail, ip);
-  const lockState = getAuthLockState(authKey);
+  const lockState = getAuthLockState(authKey, securityRecord.state);
   if (lockState.locked) {
     auditEvent(c, "tenant.login", "denied", { reason: "locked", email: normalizedEmail, retryAfterMs: lockState.retryAfterMs });
     c.header("Retry-After", String(Math.ceil(lockState.retryAfterMs / 1000)));
@@ -461,7 +677,12 @@ app.post("/server/auth/login", async (c) => {
     .maybeSingle();
   if (error) return c.json({ error: error.message }, 400);
   if (!tenant) {
-    const failure = recordAuthFailure(authKey);
+    const failure = recordAuthFailure(authKey, securityRecord.state);
+    try {
+      await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+    }
     auditEvent(c, "tenant.login", "denied", { reason: "invalid_credentials", email: normalizedEmail, failures: failure.failures, locked: failure.locked });
     return c.json({ error: "Invalid email or password" }, failure.locked ? 429 : 401);
   }
@@ -473,12 +694,22 @@ app.post("/server/auth/login", async (c) => {
 
   const hash = await hashPassword(password);
   if (hash !== tenant.password_hash) {
-    const failure = recordAuthFailure(authKey);
+    const failure = recordAuthFailure(authKey, securityRecord.state);
+    try {
+      await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+    }
     auditEvent(c, "tenant.login", "denied", { reason: "invalid_credentials", email: normalizedEmail, failures: failure.failures, locked: failure.locked });
     return c.json({ error: "Invalid email or password" }, failure.locked ? 429 : 401);
   }
 
-  clearAuthFailures(authKey);
+  clearAuthFailures(authKey, securityRecord.state);
+  try {
+    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  }
   auditEvent(c, "tenant.login", "ok", { email: normalizedEmail });
 
   const { data: salesRows, error: salesError } = await supabase
