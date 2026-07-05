@@ -196,18 +196,37 @@ function fmt(amount: number, cur: Currency) { return `${cur.symbol}${(amount * c
 let _seq = 300;
 function uid() { return `id_${++_seq}`; }
 function calcTax(sub: number, cfg: TenantConfig) { return cfg.vatEnabled ? sub * (cfg.vatRate / 100) : 0; }
-function TenantBrandMark({ businessInfo, size = "md", className = "" }: { businessInfo: BusinessInfo; size?: "sm" | "md" | "lg"; className?: string }) {
+function AppBrandMark({ size = "sm", className = "" }: { size?: "sm" | "md"; className?: string }) {
   const sizes = {
-    sm: { image: "h-7", box: "w-7 h-7 rounded-md", text: "text-xs" },
-    md: { image: "h-12", box: "w-12 h-12 rounded-xl", text: "text-xl" },
-    lg: { image: "h-14", box: "w-14 h-14 rounded-xl", text: "text-xl" },
+    sm: { box: "w-8 h-8 rounded-lg", text: "text-sm" },
+    md: { box: "w-9 h-9 rounded-lg", text: "text-lg" },
   } as const;
 
   const cfg = sizes[size];
-  const initials = businessInfo.name.slice(0, 2).toUpperCase();
+
+  return (
+    <div className={`${cfg.box} bg-primary flex items-center justify-center ${className}`.trim()}>
+      <span className={`text-primary-foreground font-black ${cfg.text}`} style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>M</span>
+    </div>
+  );
+}
+
+function TenantBrandMark({ businessInfo, size = "md", className = "" }: { businessInfo: BusinessInfo; size?: "sm" | "md" | "lg"; className?: string }) {
+  const sizes = {
+    sm: { box: "w-7 h-7 rounded-md", text: "text-xs" },
+    md: { box: "w-12 h-12 rounded-xl", text: "text-xl" },
+    lg: { box: "w-14 h-14 rounded-xl", text: "text-xl" },
+  } as const;
+
+  const cfg = sizes[size];
+  const initials = businessInfo.name.slice(0, 2).toUpperCase() || "M";
 
   if (businessInfo.logo) {
-    return <img src={businessInfo.logo} alt={`${businessInfo.name} logo`} className={`${cfg.image} object-contain ${className}`.trim()} />;
+    return (
+      <div className={`${cfg.box} overflow-hidden border border-border bg-white/5 flex items-center justify-center ${className}`.trim()}>
+        <img src={businessInfo.logo} alt={`${businessInfo.name || "Company"} logo`} className="w-full h-full object-contain" />
+      </div>
+    );
   }
 
   return (
@@ -557,8 +576,8 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
       {/* Nav */}
       <nav className="flex items-center justify-between px-8 py-4 border-b border-border sticky top-0 bg-background/90 backdrop-blur-sm z-20">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center"><span className="text-primary-foreground font-black text-sm" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>P</span></div>
-          <span className="text-lg font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>mistypos</span>
+          <AppBrandMark size="sm" />
+          <span className="text-lg font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>MISTYPOS</span>
         </div>
         <button onClick={onVenueLogin} className="rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-white/5 px-4 py-2 transition-colors">
           Venue Access
@@ -571,7 +590,7 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
           <Zap size={11} /> Cloud POS Platform
         </div>
         <h1 className="text-5xl md:text-6xl font-black text-foreground mb-5 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
-          mistypos BUILT FOR<br /><span className="text-primary">BARS & VENUES</span>
+          MISTYPOS BUILT FOR<br /><span className="text-primary">BARS & VENUES</span>
         </h1>
         <p className="text-lg text-muted-foreground mb-10 max-w-xl">
           Cloud-based point-of-sale for bars, restaurants, and cafés. Each venue gets their own isolated system — managed by your team.
@@ -589,7 +608,7 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
 
       {/* Footer — superadmin link (subtle) */}
       <footer className="border-t border-border px-8 py-4 flex items-center justify-between">
-        <p className="text-xs text-muted-foreground/40">© 2026 mistypos. All rights reserved.</p>
+        <p className="text-xs text-muted-foreground/40">© 2026 MISTYPOS. All rights reserved.</p>
         <button
           onClick={onSuperAdmin}
           className="text-[10px] text-muted-foreground/25 hover:text-muted-foreground transition-colors"
@@ -752,7 +771,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
           <div className="w-8 h-8 rounded-lg bg-primary/20 border border-primary/30 flex items-center justify-center"><Shield size={15} className="text-primary" /></div>
           <div>
             <span className="text-base font-black tracking-wide text-foreground" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>SUPERADMIN PORTAL</span>
-            <span className="ml-3 text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>mistypos</span>
+            <span className="ml-3 text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>MISTYPOS</span>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -947,8 +966,8 @@ function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant, tenantToken?: st
       <button onClick={onBack} className="absolute top-6 left-6 flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"><ArrowLeft size={14} /> Back</button>
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-2.5 mb-8 justify-center">
-          <div className="w-9 h-9 rounded-lg bg-primary flex items-center justify-center"><span className="text-primary-foreground font-black text-lg" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>P</span></div>
-          <span className="text-xl font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>mistypos</span>
+          <AppBrandMark size="md" />
+          <span className="text-xl font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>MISTYPOS</span>
         </div>
         <div className="rounded-2xl border border-border bg-card/40 p-7">
           <h2 className="text-xl font-bold mb-1" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Venue Access</h2>
