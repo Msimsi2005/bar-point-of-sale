@@ -111,6 +111,10 @@ function toTenantSummary(row: any) {
     name: row.business_info?.name ?? "",
     logo: row.business_info?.logo ?? null,
     paused: row.config?.paused === true,
+    receiptTemplate: {
+      ...defaultReceiptTemplate(),
+      ...(row.config?.receiptTemplate ?? {}),
+    },
     createdAt: row.created_at ?? new Date().toISOString(),
   };
 }
@@ -216,20 +220,60 @@ app.patch("/server/admin/tenants/:email", async (c) => {
 
   const body = await c.req.json();
   const updates: Record<string, unknown> = {};
+  let existingConfig: any | null = null;
+
+  async function ensureExistingConfig() {
+    if (existingConfig) return existingConfig;
+    const { data: existing, error: existingError } = await supabase
+      .from("tenants")
+      .select("config")
+      .eq("email", email)
+      .maybeSingle();
+    if (existingError) throw new Error(existingError.message);
+    existingConfig = existing?.config ?? defaultConfig();
+    return existingConfig;
+  }
 
   if (typeof body.password === "string" && body.password.trim().length > 0) {
     updates.password_hash = await hashPassword(body.password);
   }
 
   if (typeof body.paused === "boolean") {
-    const { data: existing, error: existingError } = await supabase
-      .from("tenants")
-      .select("config")
-      .eq("email", email)
-      .maybeSingle();
-    if (existingError) return c.json({ error: existingError.message }, 400);
-    const currentConfig = existing?.config ?? defaultConfig();
-    updates.config = { ...currentConfig, paused: body.paused };
+    try {
+      const currentConfig = await ensureExistingConfig();
+      updates.config = { ...currentConfig, paused: body.paused };
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Failed to load tenant config" }, 400);
+    }
+  }
+
+  if (body.receiptTemplate && typeof body.receiptTemplate === "object") {
+    try {
+      const currentConfig = await ensureExistingConfig();
+      const currentTemplate = {
+        ...defaultReceiptTemplate(),
+        ...(currentConfig?.receiptTemplate ?? {}),
+      };
+      const incoming = body.receiptTemplate;
+      const nextTemplate = {
+        ...currentTemplate,
+        headerLine1: typeof incoming.headerLine1 === "string" ? incoming.headerLine1.slice(0, 120) : currentTemplate.headerLine1,
+        headerLine2: typeof incoming.headerLine2 === "string" ? incoming.headerLine2.slice(0, 120) : currentTemplate.headerLine2,
+        footerLine: typeof incoming.footerLine === "string" ? incoming.footerLine.slice(0, 180) : currentTemplate.footerLine,
+        showLogo: typeof incoming.showLogo === "boolean" ? incoming.showLogo : currentTemplate.showLogo,
+        showAddress: typeof incoming.showAddress === "boolean" ? incoming.showAddress : currentTemplate.showAddress,
+        showPhone: typeof incoming.showPhone === "boolean" ? incoming.showPhone : currentTemplate.showPhone,
+        showVatNumber: typeof incoming.showVatNumber === "boolean" ? incoming.showVatNumber : currentTemplate.showVatNumber,
+        showTabName: typeof incoming.showTabName === "boolean" ? incoming.showTabName : currentTemplate.showTabName,
+        showPaymentMethod: typeof incoming.showPaymentMethod === "boolean" ? incoming.showPaymentMethod : currentTemplate.showPaymentMethod,
+      };
+      updates.config = {
+        ...(updates.config as any ?? currentConfig),
+        receiptTemplate: nextTemplate,
+      };
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Failed to update receipt template" }, 400);
+    }
   }
 
   if (Object.keys(updates).length === 0) return c.json({ ok: true });
@@ -591,6 +635,21 @@ function defaultConfig() {
       { name: "Spirits", enabled: true }, { name: "Wine", enabled: true },
       { name: "N/A", enabled: true }, { name: "Food", enabled: true },
     ],
+    receiptTemplate: defaultReceiptTemplate(),
+  };
+}
+
+function defaultReceiptTemplate() {
+  return {
+    headerLine1: "",
+    headerLine2: "",
+    footerLine: "Thank you for visiting {{businessName}}!",
+    showLogo: true,
+    showAddress: true,
+    showPhone: true,
+    showVatNumber: true,
+    showTabName: true,
+    showPaymentMethod: true,
   };
 }
 

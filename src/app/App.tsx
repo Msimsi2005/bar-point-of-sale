@@ -73,6 +73,18 @@ interface HardwareDevice {
   enabled: boolean;
 }
 
+interface ReceiptTemplate {
+  headerLine1: string;
+  headerLine2: string;
+  footerLine: string;
+  showLogo: boolean;
+  showAddress: boolean;
+  showPhone: boolean;
+  showVatNumber: boolean;
+  showTabName: boolean;
+  showPaymentMethod: boolean;
+}
+
 interface PersistedPosTab {
   id: string;
   name: string;
@@ -92,6 +104,7 @@ interface TenantConfig {
   currencies: Currency[];
   paymentMethods: PaymentMethod[];
   categories: CategoryConfig[];
+  receiptTemplate: ReceiptTemplate;
   allowZeroSales: boolean;
   vatEnabled: boolean;
   vatRate: number;
@@ -162,7 +175,14 @@ interface Tenant {
 }
 
 interface Session { tenantId: string; staffId: string; }
-interface TenantSummary { email: string; name: string; logo?: string | null; paused?: boolean; createdAt: string; }
+interface TenantSummary {
+  email: string;
+  name: string;
+  logo?: string | null;
+  paused?: boolean;
+  createdAt: string;
+  receiptTemplate?: Partial<ReceiptTemplate>;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -196,6 +216,27 @@ function fmt(amount: number, cur: Currency) { return `${cur.symbol}${(amount * c
 let _seq = 300;
 function uid() { return `id_${++_seq}`; }
 function calcTax(sub: number, cfg: TenantConfig) { return cfg.vatEnabled ? sub * (cfg.vatRate / 100) : 0; }
+function defaultReceiptTemplate(): ReceiptTemplate {
+  return {
+    headerLine1: "",
+    headerLine2: "",
+    footerLine: "Thank you for visiting {{businessName}}!",
+    showLogo: true,
+    showAddress: true,
+    showPhone: true,
+    showVatNumber: true,
+    showTabName: true,
+    showPaymentMethod: true,
+  };
+}
+
+function fillReceiptPlaceholders(templateText: string, sale: SaleRecord, businessInfo: BusinessInfo) {
+  return templateText
+    .replace(/{{\s*businessName\s*}}/gi, businessInfo.name || "MISTYPOS")
+    .replace(/{{\s*tabName\s*}}/gi, sale.tabName || "Walk-in")
+    .replace(/{{\s*paymentMethod\s*}}/gi, sale.paymentMethod || "Unknown");
+}
+
 function AppBrandMark({ size = "sm", className = "" }: { size?: "sm" | "md"; className?: string }) {
   const sizes = {
     sm: { box: "w-8 h-8 rounded-lg", text: "text-sm" },
@@ -378,8 +419,12 @@ function hydrateTabs(rawTabs: unknown): Tab[] {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function rowToTenant(row: any): Tenant {
   const rawConfig = row.config ?? {};
+  const rawReceiptTemplate = rawConfig.receiptTemplate && typeof rawConfig.receiptTemplate === "object"
+    ? rawConfig.receiptTemplate
+    : {};
   const mergedConfig = makeConfig({
     ...rawConfig,
+    receiptTemplate: { ...defaultReceiptTemplate(), ...rawReceiptTemplate },
     currencies: Array.isArray(rawConfig.currencies) ? rawConfig.currencies : makeConfig().currencies,
     paymentMethods: Array.isArray(rawConfig.paymentMethods) ? rawConfig.paymentMethods : makeConfig().paymentMethods,
     categories: Array.isArray(rawConfig.categories) ? rawConfig.categories : makeConfig().categories,
@@ -390,6 +435,17 @@ function rowToTenant(row: any): Tenant {
 
   const normalizedConfig: TenantConfig = {
     ...mergedConfig,
+    receiptTemplate: {
+      headerLine1: String(mergedConfig.receiptTemplate?.headerLine1 ?? ""),
+      headerLine2: String(mergedConfig.receiptTemplate?.headerLine2 ?? ""),
+      footerLine: String(mergedConfig.receiptTemplate?.footerLine ?? defaultReceiptTemplate().footerLine),
+      showLogo: asBool(mergedConfig.receiptTemplate?.showLogo, true),
+      showAddress: asBool(mergedConfig.receiptTemplate?.showAddress, true),
+      showPhone: asBool(mergedConfig.receiptTemplate?.showPhone, true),
+      showVatNumber: asBool(mergedConfig.receiptTemplate?.showVatNumber, true),
+      showTabName: asBool(mergedConfig.receiptTemplate?.showTabName, true),
+      showPaymentMethod: asBool(mergedConfig.receiptTemplate?.showPaymentMethod, true),
+    },
     allowZeroSales: asBool(mergedConfig.allowZeroSales, false),
     currencies: mergedConfig.currencies.map((c) => ({
       ...c,
@@ -514,6 +570,7 @@ function makeConfig(overrides: Partial<TenantConfig> = {}): TenantConfig {
       { name: "Spirits", enabled: true }, { name: "Wine", enabled: true },
       { name: "N/A", enabled: true }, { name: "Food", enabled: true },
     ],
+    receiptTemplate: defaultReceiptTemplate(),
     printers: [],
     scanners: [],
     defaultPrinterId: undefined,
@@ -693,6 +750,8 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
   const [pausingEmail, setPausingEmail] = useState<string | null>(null);
   const [editingEmail, setEditingEmail] = useState<string | null>(null);
   const [editPw, setEditPw] = useState(""); const [editLoading, setEditLoading] = useState(false);
+  const [receiptDrafts, setReceiptDrafts] = useState<Record<string, ReceiptTemplate>>({});
+  const [receiptSavingEmail, setReceiptSavingEmail] = useState<string | null>(null);
   const [sqlText, setSqlText] = useState("SELECT email, name, createdAt FROM tenants LIMIT 25;");
   const [sqlResult, setSqlResult] = useState<any | null>(null);
   const [sqlError, setSqlError] = useState(""); const [sqlLoading, setSqlLoading] = useState(false);
@@ -703,7 +762,20 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
 
   async function loadTenants() {
     setLoading(true);
-    try { setTenants(await apiAdminListTenants(token)); }
+    try {
+      const loaded = await apiAdminListTenants(token);
+      setTenants(loaded);
+      setReceiptDrafts((prev) => {
+        const next = { ...prev };
+        loaded.forEach((tenant) => {
+          next[tenant.email] = {
+            ...defaultReceiptTemplate(),
+            ...(tenant.receiptTemplate ?? {}),
+          };
+        });
+        return next;
+      });
+    }
     catch (e: unknown) { setError(e instanceof Error ? e.message : "Failed to load"); }
     finally { setLoading(false); }
   }
@@ -754,6 +826,30 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
       alert(e instanceof Error ? e.message : "Failed to update business status");
     } finally {
       setPausingEmail(null);
+    }
+  }
+
+  function updateReceiptDraft(email: string, patch: Partial<ReceiptTemplate>) {
+    setReceiptDrafts((prev) => ({
+      ...prev,
+      [email]: {
+        ...(prev[email] ?? defaultReceiptTemplate()),
+        ...patch,
+      },
+    }));
+  }
+
+  async function handleSaveReceiptTemplate(email: string) {
+    const draft = receiptDrafts[email] ?? defaultReceiptTemplate();
+    setReceiptSavingEmail(email);
+    try {
+      await apiAdminUpdateTenant(token, email, { receiptTemplate: draft });
+      setFormSuccess(`Receipt template updated for ${email}.`);
+      await loadTenants();
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : "Failed to save receipt template");
+    } finally {
+      setReceiptSavingEmail(null);
     }
   }
 
@@ -885,6 +981,74 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
                           <Save size={13} /> {editLoading ? "Saving…" : "Update Access"}
                         </button>
                         <button onClick={() => setEditingEmail(null)} className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
+                      </div>
+
+                      <div className="mt-5 border-t border-border pt-4">
+                        <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Receipt Template</p>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">Header line 1</label>
+                            <input
+                              value={(receiptDrafts[t.email] ?? defaultReceiptTemplate()).headerLine1}
+                              onChange={(e) => updateReceiptDraft(t.email, { headerLine1: e.target.value })}
+                              placeholder="Welcome to {{businessName}}"
+                              className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">Header line 2</label>
+                            <input
+                              value={(receiptDrafts[t.email] ?? defaultReceiptTemplate()).headerLine2}
+                              onChange={(e) => updateReceiptDraft(t.email, { headerLine2: e.target.value })}
+                              placeholder="Tagline or branch"
+                              className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">Footer line</label>
+                            <input
+                              value={(receiptDrafts[t.email] ?? defaultReceiptTemplate()).footerLine}
+                              onChange={(e) => updateReceiptDraft(t.email, { footerLine: e.target.value })}
+                              placeholder="Thank you for visiting {{businessName}}!"
+                              className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-4">
+                          {[
+                            { key: "showLogo", label: "Show logo" },
+                            { key: "showAddress", label: "Show address" },
+                            { key: "showPhone", label: "Show phone" },
+                            { key: "showVatNumber", label: "Show VAT" },
+                            { key: "showTabName", label: "Show tab name" },
+                            { key: "showPaymentMethod", label: "Show payment method" },
+                          ].map((option) => {
+                            const draft = receiptDrafts[t.email] ?? defaultReceiptTemplate();
+                            const checked = draft[option.key as keyof ReceiptTemplate] as boolean;
+                            return (
+                              <label key={option.key} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={(e) => updateReceiptDraft(t.email, { [option.key]: e.target.checked } as Partial<ReceiptTemplate>)}
+                                  className="accent-primary"
+                                />
+                                {option.label}
+                              </label>
+                            );
+                          })}
+                        </div>
+
+                        <p className="text-[11px] text-muted-foreground mb-3">Available placeholders: {"{{businessName}}"}, {"{{tabName}}"}, {"{{paymentMethod}}"}</p>
+
+                        <button
+                          onClick={() => handleSaveReceiptTemplate(t.email)}
+                          disabled={receiptSavingEmail === t.email}
+                          className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+                        >
+                          <Save size={13} /> {receiptSavingEmail === t.email ? "Saving…" : "Save Receipt Template"}
+                        </button>
                       </div>
                     </div>
                   )}
@@ -1074,7 +1238,7 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
 // RECEIPT MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ReceiptModal({ sale, businessInfo, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; onClose: () => void; }) {
+function ReceiptModal({ sale, businessInfo, receiptTemplate, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; receiptTemplate: ReceiptTemplate; onClose: () => void; }) {
   const printRef = useRef<HTMLDivElement>(null);
   const [printError, setPrintError] = useState("");
 
@@ -1086,7 +1250,9 @@ function ReceiptModal({ sale, businessInfo, onClose }: { sale: SaleRecord; busin
       return;
     }
 
-    const logo = businessInfo.logo ? `<img src="${businessInfo.logo}" style="height:40px;display:block;margin:0 auto 8px;" />` : "";
+    const logo = receiptTemplate.showLogo && businessInfo.logo
+      ? `<img src="${businessInfo.logo}" style="height:40px;display:block;margin:0 auto 8px;" />`
+      : "";
 
     const printHtml = `
       <html>
@@ -1139,10 +1305,12 @@ function ReceiptModal({ sale, businessInfo, onClose }: { sale: SaleRecord; busin
         <div className="flex-1 overflow-y-auto px-5 py-4 text-sm">
           <div ref={printRef}>
             <h2>{businessInfo.name}</h2>
-            {businessInfo.address && <p className="c s">{businessInfo.address}</p>}
-            {businessInfo.phone && <p className="c s">{businessInfo.phone}</p>}
+            {receiptTemplate.headerLine1 && <p className="c s">{fillReceiptPlaceholders(receiptTemplate.headerLine1, sale, businessInfo)}</p>}
+            {receiptTemplate.headerLine2 && <p className="c s">{fillReceiptPlaceholders(receiptTemplate.headerLine2, sale, businessInfo)}</p>}
+            {receiptTemplate.showAddress && businessInfo.address && <p className="c s">{businessInfo.address}</p>}
+            {receiptTemplate.showPhone && businessInfo.phone && <p className="c s">{businessInfo.phone}</p>}
             <p className="c s">{fmtDate(sale.timestamp)} · {fmtTime(sale.timestamp)}</p>
-            <p className="c s">Tab: {sale.tabName}</p>
+            {receiptTemplate.showTabName && <p className="c s">Tab: {sale.tabName}</p>}
             <div className="line" />
             {sale.items.map((o, i) => <div key={i} className="row"><span>{o.qty}× {o.menuItem.name}</span><span>{sale.currencySymbol}{(o.menuItem.price * o.qty).toFixed(2)}</span></div>)}
             <div className="line" />
@@ -1152,9 +1320,9 @@ function ReceiptModal({ sale, businessInfo, onClose }: { sale: SaleRecord; busin
             <div className="row bold"><span>TOTAL</span><span>{sale.currencySymbol}{sale.totalConverted.toFixed(2)}</span></div>
             {sale.prepaid && <><div className="row"><span>Prepaid</span><span>{sale.currencySymbol}{sale.prepaid.toFixed(2)}</span></div>{sale.change != null && <div className="row bold"><span>Change</span><span>{sale.currencySymbol}{sale.change.toFixed(2)}</span></div>}</>}
             <div className="line" />
-            <p className="c s">Paid via {sale.paymentMethod}</p>
-            {businessInfo.vatNumber && <p className="c s">VAT No: {businessInfo.vatNumber}</p>}
-            <p className="c s">Thank you for visiting {businessInfo.name}!</p>
+            {receiptTemplate.showPaymentMethod && <p className="c s">Paid via {sale.paymentMethod}</p>}
+            {receiptTemplate.showVatNumber && businessInfo.vatNumber && <p className="c s">VAT No: {businessInfo.vatNumber}</p>}
+            <p className="c s">{fillReceiptPlaceholders(receiptTemplate.footerLine || defaultReceiptTemplate().footerLine, sale, businessInfo)}</p>
           </div>
           {printError && <p className="mt-3 text-xs text-amber-300">{printError}</p>}
         </div>
@@ -2618,7 +2786,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
 
       {payingTab && <PaymentModal tab={payingTab} tenant={tenant} staffId={staffId} onClose={()=>setPayingTab(null)} onComplete={handlePaymentComplete} />}
       {showNewTab && <NewTabModal tenant={tenant} onClose={()=>setShowNewTab(false)} onCreate={createTab} />}
-      {pendingSale && <ReceiptModal sale={pendingSale} businessInfo={tenant.businessInfo} onClose={()=>setPendingSale(null)} />}
+      {pendingSale && <ReceiptModal sale={pendingSale} businessInfo={tenant.businessInfo} receiptTemplate={tenant.config.receiptTemplate} onClose={()=>setPendingSale(null)} />}
     </div>
   );
 }

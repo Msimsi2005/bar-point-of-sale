@@ -34,6 +34,17 @@ export async function apiAdminCreateTenant(token: string, data: {
 export async function apiAdminUpdateTenant(token: string, email: string, patch: {
   password?: string;
   paused?: boolean;
+  receiptTemplate?: {
+    headerLine1?: string;
+    headerLine2?: string;
+    footerLine?: string;
+    showLogo?: boolean;
+    showAddress?: boolean;
+    showPhone?: boolean;
+    showVatNumber?: boolean;
+    showTabName?: boolean;
+    showPaymentMethod?: boolean;
+  };
 }) {
   return call(`/admin/tenants/${encodeURIComponent(email)}`, "PATCH", patch, undefined, { "X-Superadmin-Token": token });
 }
