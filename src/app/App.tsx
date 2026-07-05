@@ -247,6 +247,16 @@ function asBool(value: unknown, fallback = false) {
   return fallback;
 }
 
+export function makeTenantSavePatch(snapshot: Tenant) {
+  return {
+    businessInfo: snapshot.businessInfo,
+    config: snapshot.config,
+    menu: snapshot.menu,
+    staff: snapshot.staff,
+    customers: snapshot.customers,
+  };
+}
+
 function defaultPermissionsForRole(role: StaffMember["role"]): StaffPermissions {
   if (role === "owner") {
     return {
@@ -946,7 +956,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
 // VENUE LOGIN (for companies provisioned by superadmin)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant, tenantToken?: string) => void; onBack: () => void; }) {
+export function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant, tenantToken?: string) => void; onBack: () => void; }) {
   const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState(""); const [loading, setLoading] = useState(false);
 
@@ -1000,7 +1010,7 @@ function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant, tenantToken?: st
 // STAFF PIN SELECTOR
 // ─────────────────────────────────────────────────────────────────────────────
 
-function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect: (staffId: string) => void; onBack: () => void; }) {
+export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect: (staffId: string) => void; onBack: () => void; }) {
   const [selected, setSelected] = useState<StaffMember | null>(null);
   const [pin, setPin] = useState(""); const [error, setError] = useState(false);
 
@@ -1164,7 +1174,7 @@ function ReceiptModal({ sale, businessInfo, onClose }: { sale: SaleRecord; busin
 // PAYMENT MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab; tenant: Tenant; staffId: string; onClose: () => void; onComplete: (s: SaleRecord) => void; }) {
+export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab; tenant: Tenant; staffId: string; onClose: () => void; onComplete: (s: SaleRecord) => void; }) {
   const { config } = tenant;
   const enabledMethods = config.paymentMethods.filter((m) => m.enabled);
   const enabledCurrencies = config.currencies.filter((c) => c.enabled);
@@ -1195,7 +1205,7 @@ function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab;
 
   function handleCharge() {
     const sale: SaleRecord = {
-      id: uid(), tabName: tab.name, items: tab.orders, subtotal, tax, total, totalConverted,
+      id: crypto.randomUUID(), tabName: tab.name, items: tab.orders, subtotal, tax, total, totalConverted,
       paymentMethod: enabledMethods.find((m) => m.id === method)?.name ?? method,
       currencyCode: currency?.code ?? "ZAR", currencySymbol: currency?.symbol ?? "R",
       timestamp: new Date(), staffId, prepaid: tab.prepaid, customerId: tab.customerId,
@@ -1351,10 +1361,10 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
 // SALES SECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
-function SalesSection({ sales }: { sales: SaleRecord[] }) {
+export function SalesSection({ sales }: { sales: SaleRecord[] }) {
   const allDates = Array.from(new Set(sales.map((s) => dateKey(s.timestamp)))).sort((a, b) => b.localeCompare(a));
   const [selectedDate, setSelectedDate] = useState("all");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
   const filtered = selectedDate === "all" ? sales : sales.filter((s) => dateKey(s.timestamp) === selectedDate);
   const sorted = [...filtered].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
@@ -1401,19 +1411,22 @@ function SalesSection({ sales }: { sales: SaleRecord[] }) {
       <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Transactions</p>
       {sorted.length === 0 ? <div className="rounded-xl border border-border bg-card/20 p-8 text-center"><BarChart2 size={28} className="text-muted-foreground/20 mx-auto mb-2" /><p className="text-sm text-muted-foreground">No transactions.</p></div> : (
         <div className="space-y-1.5">
-          {sorted.map((sale) => (
-            <div key={sale.id} className="rounded-xl border border-border bg-card/30 overflow-hidden">
-              <button onClick={() => setExpandedId(expandedId === sale.id ? null : sale.id)} className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/3 transition-colors text-left">
+          {sorted.map((sale, index) => {
+            const saleKey = `${sale.id}-${sale.timestamp.toISOString()}-${index}`;
+
+            return (
+            <div key={saleKey} className="rounded-xl border border-border bg-card/30 overflow-hidden">
+              <button onClick={() => setExpandedKey(expandedKey === saleKey ? null : saleKey)} className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/3 transition-colors text-left">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap"><p className="text-sm font-semibold">{sale.tabName}</p><span className="text-[10px] text-muted-foreground bg-white/5 rounded px-1.5 py-0.5">{sale.paymentMethod}</span>{sale.prepaid && <span className="text-[10px] text-green-400 bg-green-400/10 rounded px-1.5 py-0.5">Pre-paid</span>}</div>
                   <p className="text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmtDate(sale.timestamp)} · {fmtTime(sale.timestamp)}</p>
                 </div>
                 <div className="text-right shrink-0"><p className="text-sm font-bold" style={{ fontFamily: "'DM Mono', monospace" }}>R{sale.total.toFixed(2)}</p><p className="text-[10px] text-muted-foreground">{sale.items.reduce((q,i)=>q+i.qty,0)} items</p></div>
-                <ChevronDown size={14} className={`text-muted-foreground transition-transform shrink-0 ${expandedId === sale.id ? "rotate-180" : ""}`} />
+                <ChevronDown size={14} className={`text-muted-foreground transition-transform shrink-0 ${expandedKey === saleKey ? "rotate-180" : ""}`} />
               </button>
-              {expandedId === sale.id && <div className="px-4 pb-3 border-t border-border/50 pt-2 space-y-1">{sale.items.map((o,i) => <div key={i} className="flex justify-between text-xs text-muted-foreground"><span>{o.qty}× {o.menuItem.name}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{(o.menuItem.price*o.qty).toFixed(2)}</span></div>)}{sale.tax > 0 && <div className="flex justify-between text-xs text-muted-foreground border-t border-border/30 pt-1"><span>VAT</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{sale.tax.toFixed(2)}</span></div>}{sale.change != null && <div className="flex justify-between text-xs text-green-400 pt-0.5"><span>Change given</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{sale.change.toFixed(2)}</span></div>}</div>}
+              {expandedKey === saleKey && <div className="px-4 pb-3 border-t border-border/50 pt-2 space-y-1">{sale.items.map((o,i) => <div key={i} className="flex justify-between text-xs text-muted-foreground"><span>{o.qty}× {o.menuItem.name}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{(o.menuItem.price*o.qty).toFixed(2)}</span></div>)}{sale.tax > 0 && <div className="flex justify-between text-xs text-muted-foreground border-t border-border/30 pt-1"><span>VAT</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{sale.tax.toFixed(2)}</span></div>}{sale.change != null && <div className="flex justify-between text-xs text-green-400 pt-0.5"><span>Change given</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{sale.change.toFixed(2)}</span></div>}</div>}
             </div>
-          ))}
+          );})}
         </div>
       )}
     </div>
@@ -2673,13 +2686,7 @@ export default function App() {
 
   const persistTenantSnapshot = useCallback((snapshot: Tenant) => {
     if (!tenantToken) return;
-    apiSaveTenant(snapshot.email, {
-      businessInfo: snapshot.businessInfo,
-      config: snapshot.config,
-      menu: snapshot.menu,
-      staff: snapshot.staff,
-      customers: snapshot.customers,
-    }, tenantToken).catch(console.error);
+    apiSaveTenant(snapshot.email, makeTenantSavePatch(snapshot), tenantToken).catch(console.error);
   }, [tenantToken]);
 
   const verifyBackend = useCallback(async () => {
