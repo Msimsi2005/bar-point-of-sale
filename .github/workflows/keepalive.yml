@@ -1,0 +1,50 @@
+name: Keepalive Pings
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping configured endpoints
+        env:
+          VERCEL_URL: ${{ secrets.KEEPALIVE_VERCEL_URL }}
+          SUPABASE_HEALTH_URL: ${{ secrets.KEEPALIVE_SUPABASE_HEALTH_URL }}
+        run: |
+          set -euo pipefail
+
+          urls=()
+          if [ -n "${VERCEL_URL:-}" ]; then
+            urls+=("$VERCEL_URL")
+          fi
+          if [ -n "${SUPABASE_HEALTH_URL:-}" ]; then
+            urls+=("$SUPABASE_HEALTH_URL")
+          fi
+
+          if [ ${#urls[@]} -eq 0 ]; then
+            echo "No keepalive URLs configured."
+            echo "Set KEEPALIVE_VERCEL_URL and/or KEEPALIVE_SUPABASE_HEALTH_URL repository secrets."
+            exit 1
+          fi
+
+          for url in "${urls[@]}"; do
+            echo "Pinging $url"
+            status=$(curl --silent --show-error --location \
+              --max-time 20 \
+              --retry 2 \
+              --retry-delay 2 \
+              --output /dev/null \
+              --write-out "%{http_code}" \
+              --user-agent "bar-pos-keepalive/1.0" \
+              "$url")
+
+            if [ "$status" -lt 200 ] || [ "$status" -ge 400 ]; then
+              echo "Ping failed for $url with HTTP $status"
+              exit 1
+            fi
+
+            echo "OK: $url -> $status"
+          done
