@@ -60,6 +60,21 @@
 
   Push to GitHub and redeploy Vercel.
 
+  ### 6) Keep Supabase + Vercel warm (avoid sleeping/cold starts)
+
+  This repo includes [.github/workflows/keepalive.yml](.github/workflows/keepalive.yml), which runs every 30 minutes and pings your deployed endpoints.
+
+  In GitHub -> Settings -> Secrets and variables -> Actions, add:
+
+  - `KEEPALIVE_VERCEL_URL` = your production Vercel URL (for example `https://your-app.vercel.app`)
+  - `KEEPALIVE_SUPABASE_HEALTH_URL` = your Supabase function health URL (for example `https://zqxxiyutriuqjovdknoi.supabase.co/functions/v1/server/health`)
+
+  Notes:
+
+  - Vercel static hosting does not truly "sleep", but this helps keep route/function paths warm.
+  - Supabase free projects can pause after inactivity; regular health pings help prevent that.
+  - For guaranteed no-pause behavior, use paid plans.
+
   ## Go-Live Operations Docs
 
   - `guidelines/Security-Hardening.md`

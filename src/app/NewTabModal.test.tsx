@@ -32,7 +32,10 @@ const tenant = {
   },
   menu: [],
   sales: [],
-  customers: [{ id: "customer-1", name: "Alex", email: "", phone: "", totalSpent: 0, visits: 0, notes: "" }],
+  customers: [
+    { id: "customer-1", name: "Alex", email: "alex@example.com", phone: "", totalSpent: 0, visits: 0, notes: "", creditBalance: -25 },
+    { id: "customer-2", name: "Nandi", email: "nandi@example.com", phone: "", totalSpent: 0, visits: 0, notes: "", creditBalance: 10 },
+  ],
   staff: [],
   createdAt: new Date("2026-07-05T00:00:00.000Z"),
 } as const;
@@ -74,5 +77,22 @@ describe("NewTabModal", () => {
     await user.type(tableInput, "12");
     await user.click(openButton);
     expect(onCreate).toHaveBeenCalledWith("12", undefined, undefined);
+  });
+
+  it("filters creditors via search and links selected customer to the new tab", async () => {
+    const user = userEvent.setup();
+    const onCreate = vi.fn();
+
+    render(<NewTabModal tenant={tenant as never} onClose={() => {}} onCreate={onCreate} />);
+
+    await user.type(screen.getByPlaceholderText("Search customer by name, email, or phone"), "nandi");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.selectOptions(screen.getByLabelText("Link Creditor (optional)"), "customer-2");
+
+    const tableInput = screen.getByLabelText("Table *");
+    await user.type(tableInput, "C-17");
+    await user.click(screen.getByRole("button", { name: "Open Tab" }));
+
+    expect(onCreate).toHaveBeenCalledWith("C-17", undefined, "customer-2");
   });
 });

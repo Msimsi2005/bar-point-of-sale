@@ -13,7 +13,7 @@ import {
   TrendingUp, Calendar, ChevronDown, Tag, Star, LogOut,
   User, Shield, Upload, Phone, Mail, MapPin, Percent,
   Info, CheckCircle, Eye, EyeOff, Store,
-  UserCheck, Bell,
+  UserCheck, Bell, Wallet,
 } from "lucide-react";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ interface StaffPermissions {
 }
 
 interface StaffMember { id: string; name: string; pin: string; role: "owner" | "manager" | "bartender"; permissions: StaffPermissions; }
-interface Customer { id: string; name: string; email: string; phone: string; totalSpent: number; visits: number; notes: string; }
+interface Customer { id: string; name: string; email: string; phone: string; totalSpent: number; visits: number; notes: string; creditBalance?: number; }
 interface CategoryConfig { name: string; enabled: boolean; }
 interface Currency { code: string; symbol: string; name: string; rate: number; enabled: boolean; }
 interface PaymentMethod { id: string; name: string; icon: string; enabled: boolean; custom?: boolean; }
@@ -123,7 +123,7 @@ interface BusinessInfo {
 
 interface MenuItem {
   id: string; name: string; category: string; price: number;
-  description: string; stock: number; popular?: boolean;
+  description: string; stock: number; cost?: number; popular?: boolean;
 }
 
 interface OrderItem { menuItem: MenuItem; qty: number; }
@@ -139,6 +139,8 @@ interface SaleRecord {
   paymentMethod: string; currencyCode: string; currencySymbol: string;
   timestamp: Date; staffId: string; customerId?: string;
   prepaid?: number; change?: number;
+  accountAction?: "purchase" | "on-account" | "settlement" | "deposit";
+  accountAmount?: number;
 }
 
 interface StockMovementLine {
@@ -213,6 +215,20 @@ function elapsed(d: Date) {
   if (m < 1) return "now"; if (m < 60) return `${m}m`; return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 function fmt(amount: number, cur: Currency) { return `${cur.symbol}${(amount * cur.rate).toFixed(2)}`; }
+function roundMoney(v: number) { return Math.round(v * 100) / 100; }
+function customerCreditState(balance: number) {
+  if (balance > 0) return { label: "Positive", style: "text-green-400" };
+  if (balance < 0) return { label: "Negative", style: "text-red-400" };
+  return { label: "Clear", style: "text-muted-foreground" };
+}
+function defaultCurrency(config: Pick<TenantConfig, "currencies" | "defaultCurrencyCode">): Currency {
+  const fallback: Currency = { code: "ZAR", symbol: "R", name: "South African Rand", rate: 1, enabled: true };
+  const currencies = Array.isArray(config.currencies) ? config.currencies : [];
+  const byCode = currencies.find((c) => c.code === config.defaultCurrencyCode);
+  if (byCode) return byCode;
+  const enabled = currencies.find((c) => c.enabled);
+  return enabled ?? currencies[0] ?? fallback;
+}
 let _seq = 300;
 function uid() { return `id_${++_seq}`; }
 function calcTax(sub: number, cfg: TenantConfig) { return cfg.vatEnabled ? sub * (cfg.vatRate / 100) : 0; }
@@ -433,6 +449,19 @@ function rowToTenant(row: any): Tenant {
     stockMovements: Array.isArray(rawConfig.stockMovements) ? rawConfig.stockMovements : makeConfig().stockMovements,
   });
 
+  const defaultCurrencies = makeConfig().currencies;
+  const normalizedCurrencies = mergedConfig.currencies.map((c) => {
+    const parsedRate = Number(c.rate);
+    return {
+      ...c,
+      rate: Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : 1,
+      enabled: asBool(c.enabled, true),
+    };
+  });
+  const missingCurrencies = defaultCurrencies.filter(
+    (base) => !normalizedCurrencies.some((c) => c.code === base.code),
+  );
+
   const normalizedConfig: TenantConfig = {
     ...mergedConfig,
     receiptTemplate: {
@@ -447,10 +476,7 @@ function rowToTenant(row: any): Tenant {
       showPaymentMethod: asBool(mergedConfig.receiptTemplate?.showPaymentMethod, true),
     },
     allowZeroSales: asBool(mergedConfig.allowZeroSales, false),
-    currencies: mergedConfig.currencies.map((c) => ({
-      ...c,
-      enabled: asBool(c.enabled, true),
-    })),
+    currencies: [...normalizedCurrencies, ...missingCurrencies],
     paymentMethods: mergedConfig.paymentMethods.map((m) => ({
       ...m,
       enabled: asBool(m.enabled, true),
@@ -525,7 +551,16 @@ function rowToTenant(row: any): Tenant {
     config: normalizedConfig,
     menu: (row.menu ?? []).map((m: any) => ({ ...m })),
     sales: (row.sales ?? []).map((s: any) => ({ ...s, timestamp: new Date(s.timestamp ?? s.savedAt ?? Date.now()) })),
-    customers: (row.customers ?? []).map((c: any) => ({ id: c.id, name: c.name, email: c.email ?? "", phone: c.phone ?? "", totalSpent: c.total_spent ?? c.totalSpent ?? 0, visits: c.visits ?? 0, notes: c.notes ?? "" })),
+    customers: (row.customers ?? []).map((c: any) => ({
+      id: c.id,
+      name: c.name,
+      email: c.email ?? "",
+      phone: c.phone ?? "",
+      totalSpent: c.total_spent ?? c.totalSpent ?? 0,
+      visits: c.visits ?? 0,
+      notes: c.notes ?? "",
+      creditBalance: c.credit_balance ?? c.creditBalance ?? 0,
+    })),
     staff: (row.staff ?? []).map((s: any) => {
       const role = (s.role === "owner" || s.role === "manager" || s.role === "bartender") ? s.role : "bartender";
       return {
@@ -553,6 +588,7 @@ function makeConfig(overrides: Partial<TenantConfig> = {}): TenantConfig {
       { code: "USD", symbol: "$", name: "US Dollar", rate: 0.054, enabled: true },
       { code: "EUR", symbol: "€", name: "Euro", rate: 0.050, enabled: false },
       { code: "GBP", symbol: "£", name: "British Pound", rate: 0.043, enabled: false },
+      { code: "ZIG", symbol: "ZiG", name: "Zimbabwe Gold", rate: 1, enabled: false },
       { code: "NAD", symbol: "N$", name: "Namibian Dollar", rate: 1.0, enabled: false },
       { code: "BWP", symbol: "P", name: "Botswana Pula", rate: 0.073, enabled: false },
       { code: "ZMW", symbol: "K", name: "Zambian Kwacha", rate: 1.42, enabled: false },
@@ -1342,10 +1378,12 @@ function ReceiptModal({ sale, businessInfo, receiptTemplate, onClose }: { sale: 
 export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab; tenant: Tenant; staffId: string; onClose: () => void; onComplete: (s: SaleRecord) => void; }) {
   const { config } = tenant;
   const enabledMethods = config.paymentMethods.filter((m) => m.enabled);
-  const enabledCurrencies = config.currencies.filter((c) => c.enabled);
   const [method, setMethod] = useState(enabledMethods[0]?.id ?? "");
-  const [currencyCode, setCurrencyCode] = useState(config.defaultCurrencyCode);
   const [cashInput, setCashInput] = useState(tab.prepaid ? String(tab.prepaid) : "");
+  const [accountMode, setAccountMode] = useState<"purchase" | "on-account" | "settlement" | "deposit">("purchase");
+  const [accountAmountInput, setAccountAmountInput] = useState("");
+  const accountAmountInputId = "payment-account-amount";
+  const cashTenderedInputId = "payment-cash-tendered";
 
   useEffect(() => {
     if (!enabledMethods.length) {
@@ -1357,24 +1395,50 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
     }
   }, [enabledMethods, method]);
 
-  const currency = enabledCurrencies.find((c) => c.code === currencyCode) ?? enabledCurrencies[0];
+  const currency = defaultCurrency(config);
   const subtotal = calcSubtotal(tab.orders);
   const tax = calcTax(subtotal, config);
   const total = subtotal + tax;
-  const totalConverted = total * (currency?.rate ?? 1);
+  const totalConverted = total * currency.rate;
+  const customer = tenant.customers.find((c) => c.id === tab.customerId) ?? null;
+  const accountAmount = Math.max(0, parseFloat(accountAmountInput) || 0);
   const cashAmount = parseFloat(cashInput) || 0;
-  const change = cashAmount - totalConverted;
+  const isSettlement = accountMode === "settlement";
+  const isDeposit = accountMode === "deposit";
+  const isOnAccount = accountMode === "on-account";
+  const saleAmount = isSettlement || isDeposit ? accountAmount : totalConverted;
+  const change = cashAmount - saleAmount;
   const isCash = method === "cash";
-  const hasChargeableTotal = config.allowZeroSales || total > 0;
-  const canCharge = enabledMethods.length > 0 && hasChargeableTotal && (!isCash || cashAmount >= totalConverted);
+  const hasChargeableTotal = config.allowZeroSales || total > 0 || !!tab.customerId;
+  const hasValidModeAmount = isSettlement || isDeposit ? accountAmount > 0 : hasChargeableTotal;
+  const methodAllowed = isOnAccount ? true : enabledMethods.length > 0;
+  const canCharge = methodAllowed && hasValidModeAmount && (!isCash || isOnAccount || cashAmount >= saleAmount);
 
   function handleCharge() {
+    const paymentLabel = isOnAccount
+      ? "On Account"
+      : enabledMethods.find((m) => m.id === method)?.name ?? method;
+    const accountAction: SaleRecord["accountAction"] = isOnAccount
+      ? "on-account"
+      : isSettlement
+        ? "settlement"
+        : isDeposit
+          ? "deposit"
+          : "purchase";
     const sale: SaleRecord = {
-      id: crypto.randomUUID(), tabName: tab.name, items: tab.orders, subtotal, tax, total, totalConverted,
-      paymentMethod: enabledMethods.find((m) => m.id === method)?.name ?? method,
-      currencyCode: currency?.code ?? "ZAR", currencySymbol: currency?.symbol ?? "R",
+      id: crypto.randomUUID(),
+      tabName: tab.name,
+      items: isSettlement || isDeposit ? [] : tab.orders,
+      subtotal: isSettlement || isDeposit ? 0 : subtotal,
+      tax: isSettlement || isDeposit ? 0 : tax,
+      total: isSettlement || isDeposit ? 0 : total,
+      totalConverted: saleAmount,
+      paymentMethod: paymentLabel,
+      currencyCode: currency.code, currencySymbol: currency.symbol,
       timestamp: new Date(), staffId, prepaid: tab.prepaid, customerId: tab.customerId,
-      change: isCash && cashAmount > totalConverted ? parseFloat((cashAmount - totalConverted).toFixed(2)) : undefined,
+      change: isCash && cashAmount > saleAmount ? parseFloat((cashAmount - saleAmount).toFixed(2)) : undefined,
+      accountAction,
+      accountAmount: saleAmount,
     };
     onComplete(sale);
   }
@@ -1388,29 +1452,65 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
         </div>
         <div className="flex-1 overflow-y-auto">
           <div className="px-6 pt-4 pb-2 max-h-28 overflow-y-auto space-y-1">
-            {tab.orders.map((o) => <div key={o.menuItem.id} className="flex justify-between text-sm"><span className="text-muted-foreground">{o.qty}× {o.menuItem.name}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{currency ? fmt(o.menuItem.price * o.qty, currency) : `R${(o.menuItem.price * o.qty).toFixed(2)}`}</span></div>)}
+            {tab.orders.map((o) => <div key={o.menuItem.id} className="flex justify-between text-sm"><span className="text-muted-foreground">{o.qty}× {o.menuItem.name}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price * o.qty, currency)}</span></div>)}
           </div>
           <div className="mx-6 mt-2 mb-4 rounded-xl bg-white/3 border border-amber-900/10 px-4 py-3 space-y-1">
-            <div className="flex justify-between text-sm text-muted-foreground"><span>Subtotal</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{currency ? fmt(subtotal, currency) : `R${subtotal.toFixed(2)}`}</span></div>
-            {tax > 0 && <div className="flex justify-between text-sm text-muted-foreground"><span>VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{currency ? fmt(tax, currency) : `R${tax.toFixed(2)}`}</span></div>}
+            <div className="flex justify-between text-sm text-muted-foreground"><span>Subtotal</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(subtotal, currency)}</span></div>
+            {tax > 0 && <div className="flex justify-between text-sm text-muted-foreground"><span>VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(tax, currency)}</span></div>}
             {!config.vatEnabled && <p className="text-xs text-muted-foreground flex items-center gap-1"><Info size={11} /> VAT disabled</p>}
-            <div className="flex justify-between font-bold border-t border-amber-900/15 pt-1.5 mt-1"><span className="text-foreground">Total</span><span className="text-primary text-lg" style={{ fontFamily: "'DM Mono', monospace" }}>{currency ? fmt(total, currency) : `R${total.toFixed(2)}`}</span></div>
+            <div className="flex justify-between font-bold border-t border-amber-900/15 pt-1.5 mt-1"><span className="text-foreground">Total</span><span className="text-primary text-lg" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(total, currency)}</span></div>
             {tab.prepaid && tab.prepaid > 0 && (
               <div className={`flex justify-between text-sm font-bold pt-1 border-t border-amber-900/15 ${tab.prepaid >= totalConverted ? "text-green-400" : "text-red-400"}`}>
                 <span>{tab.prepaid >= totalConverted ? "Change Due" : "Balance Owed"}</span>
-                <span style={{ fontFamily: "'DM Mono', monospace" }}>{currency?.symbol ?? "R"}{Math.abs(tab.prepaid - totalConverted).toFixed(2)}</span>
+                <span style={{ fontFamily: "'DM Mono', monospace" }}>{currency.symbol}{Math.abs(tab.prepaid - totalConverted).toFixed(2)}</span>
+              </div>
+            )}
+            {customer && (
+              <div className="flex justify-between text-sm pt-1 border-t border-amber-900/15">
+                <span className="text-muted-foreground">Customer Credit</span>
+                <span className={(customer.creditBalance ?? 0) < 0 ? "text-red-400" : (customer.creditBalance ?? 0) > 0 ? "text-green-400" : "text-muted-foreground"} style={{ fontFamily: "'DM Mono', monospace" }}>
+                  {currency.symbol}{Math.abs(customer.creditBalance ?? 0).toFixed(2)} {(customer.creditBalance ?? 0) < 0 ? "(negative)" : (customer.creditBalance ?? 0) > 0 ? "(positive)" : "(clear)"}
+                </span>
               </div>
             )}
           </div>
-          {enabledCurrencies.length > 1 && (
+          {tab.customerId && (
             <div className="px-6 mb-4">
-              <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Currency</p>
-              <div className="flex flex-wrap gap-1.5">{enabledCurrencies.map((c) => <button key={c.code} onClick={() => { setCurrencyCode(c.code); setCashInput(""); }} className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-all ${currencyCode === c.code ? "bg-primary text-primary-foreground" : "bg-white/5 text-muted-foreground hover:text-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{c.symbol} {c.code}</button>)}</div>
+              <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Account Handling</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[{ id: "purchase", label: "Purchase" }, { id: "on-account", label: "On Account" }, { id: "settlement", label: "Settlement" }, { id: "deposit", label: "Deposit Top-up" }].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setAccountMode(opt.id as "purchase" | "on-account" | "settlement" | "deposit")}
+                    className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all ${accountMode === opt.id ? "bg-primary text-primary-foreground" : "bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              {(isSettlement || isDeposit) && (
+                <div className="mt-2">
+                  <label htmlFor={accountAmountInputId} className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2 block" style={{ fontFamily: "'DM Mono', monospace" }}>
+                    {isSettlement ? "Settlement Amount" : "Deposit Amount"} ({currency.symbol})
+                  </label>
+                  <input
+                    id={accountAmountInputId}
+                    type="number"
+                    min="0"
+                    value={accountAmountInput}
+                    onChange={(e) => setAccountAmountInput(e.target.value)}
+                    placeholder={`${currency.symbol}0.00`}
+                    className="w-full rounded-lg bg-white/5 border border-amber-900/20 px-4 py-3 text-foreground text-lg font-semibold focus:outline-none focus:border-primary/50 transition-colors"
+                    style={{ fontFamily: "'DM Mono', monospace" }}
+                  />
+                </div>
+              )}
             </div>
           )}
           <div className="px-6 mb-4">
             <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Payment Method</p>
-            {enabledMethods.length === 0 ? (
+            {enabledMethods.length === 0 && !isOnAccount ? (
               <div className="rounded-lg border border-red-900/30 bg-red-900/10 px-3 py-2 text-xs text-red-300">
                 No payment methods are enabled. Ask admin to enable at least one in Admin - Payments.
               </div>
@@ -1420,12 +1520,12 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
               </div>
             )}
           </div>
-          {isCash && (
+          {isCash && !isOnAccount && (
             <div className="px-6 mb-4">
-              <label className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2 block" style={{ fontFamily: "'DM Mono', monospace" }}>Cash Tendered ({currency?.symbol ?? "R"})</label>
-              <input type="number" value={cashInput} onChange={(e) => setCashInput(e.target.value)} placeholder={`${currency?.symbol ?? "R"}0.00`} className="w-full rounded-lg bg-white/5 border border-amber-900/20 px-4 py-3 text-foreground text-lg font-semibold focus:outline-none focus:border-primary/50 transition-colors" style={{ fontFamily: "'DM Mono', monospace" }} />
-              {cashAmount >= totalConverted && cashInput && <div className="flex justify-between text-sm mt-2"><span className="text-muted-foreground">Change due</span><span className="text-green-400 font-bold" style={{ fontFamily: "'DM Mono', monospace" }}>{currency?.symbol ?? "R"}{change.toFixed(2)}</span></div>}
-              {cashInput && cashAmount < totalConverted && <div className="flex items-center gap-1 text-xs text-red-400 mt-2"><AlertCircle size={12} /> Short by {currency?.symbol ?? "R"}{(totalConverted - cashAmount).toFixed(2)}</div>}
+              <label htmlFor={cashTenderedInputId} className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2 block" style={{ fontFamily: "'DM Mono', monospace" }}>Cash Tendered ({currency.symbol})</label>
+              <input id={cashTenderedInputId} type="number" value={cashInput} onChange={(e) => setCashInput(e.target.value)} placeholder={`${currency.symbol}0.00`} className="w-full rounded-lg bg-white/5 border border-amber-900/20 px-4 py-3 text-foreground text-lg font-semibold focus:outline-none focus:border-primary/50 transition-colors" style={{ fontFamily: "'DM Mono', monospace" }} />
+              {cashAmount >= saleAmount && cashInput && <div className="flex justify-between text-sm mt-2"><span className="text-muted-foreground">Change due</span><span className="text-green-400 font-bold" style={{ fontFamily: "'DM Mono', monospace" }}>{currency.symbol}{change.toFixed(2)}</span></div>}
+              {cashInput && cashAmount < saleAmount && <div className="flex items-center gap-1 text-xs text-red-400 mt-2"><AlertCircle size={12} /> Short by {currency.symbol}{(saleAmount - cashAmount).toFixed(2)}</div>}
             </div>
           )}
           {!config.allowZeroSales && total <= 0 && (
@@ -1438,7 +1538,15 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
         </div>
         <div className="px-6 pb-6 pt-2 shrink-0">
           <button onClick={handleCharge} disabled={!canCharge} className="w-full rounded-xl bg-primary text-primary-foreground py-4 font-bold tracking-widest transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
-            {isCash ? "COMPLETE CASH PAYMENT" : `CHARGE ${currency ? fmt(total, currency) : `R${total.toFixed(2)}`}`}
+            {isOnAccount
+              ? `POST ${fmt(total, currency)} TO ACCOUNT`
+              : isSettlement
+                ? `SETTLE ${currency.symbol}${accountAmount.toFixed(2)}`
+                : isDeposit
+                  ? `TOP-UP ${currency.symbol}${accountAmount.toFixed(2)}`
+                  : isCash
+                    ? "COMPLETE CASH PAYMENT"
+                    : `CHARGE ${fmt(total, currency)}`}
           </button>
         </div>
       </div>
@@ -1454,11 +1562,20 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
   const [name, setName] = useState(""); const [payFirst, setPayFirst] = useState(false);
   const [tabType, setTabType] = useState<"table" | "guest" | "walk-in">("table");
   const [prepaidInput, setPrepaidInput] = useState(""); const [customerId, setCustomerId] = useState("");
-  const zarSymbol = tenant.config.currencies.find((c) => c.code === "ZAR")?.symbol ?? "R";
+  const [creditorSearch, setCreditorSearch] = useState("");
+  const [appliedCreditorSearch, setAppliedCreditorSearch] = useState("");
+  const defaultCurrencySymbol = defaultCurrency(tenant.config).symbol;
   const nameInputId = "new-tab-name";
   const customerSelectId = "new-tab-customer";
+  const customerSearchId = "new-tab-customer-search";
   const prepaidInputId = "new-tab-prepaid";
   const requiresName = tabType !== "walk-in";
+  const creditorResults = tenant.customers.filter((c) => {
+    if (!appliedCreditorSearch) return true;
+    const q = appliedCreditorSearch.toLowerCase();
+    return (`${c.name} ${c.email} ${c.phone}`).toLowerCase().includes(q);
+  });
+  const selectedCreditor = tenant.customers.find((c) => c.id === customerId);
 
   const inputLabel = tabType === "table"
     ? "Table *"
@@ -1474,7 +1591,7 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
 
   function submit() {
     if (requiresName && !name.trim()) return;
-    const prepaid = payFirst && prepaidInput ? parseFloat(prepaidInput) : undefined;
+    const prepaid = payFirst ? Math.max(0, parseFloat(prepaidInput) || 0) : undefined;
     const displayName = name.trim() || "Walk-in";
     onCreate(displayName, prepaid, customerId || undefined);
   }
@@ -1504,13 +1621,47 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
             </div>
           </div>
           <div><label htmlFor={nameInputId} className="text-xs text-muted-foreground mb-1 block">{inputLabel}</label><input id={nameInputId} autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder={inputPlaceholder} className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-          {tenant.customers.length > 0 && <div><label htmlFor={customerSelectId} className="text-xs text-muted-foreground mb-1 block">Link Customer (optional)</label><select id={customerSelectId} value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50"><option value="">— Walk-in —</option>{tenant.customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>}
+          {tenant.customers.length > 0 && (
+            <div className="rounded-xl border border-border bg-white/3 p-3">
+              <p className="text-sm font-semibold mb-2">Creditors</p>
+              <div className="flex gap-2 mb-2">
+                <input
+                  id={customerSearchId}
+                  value={creditorSearch}
+                  onChange={(e) => setCreditorSearch(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") setAppliedCreditorSearch(creditorSearch.trim()); }}
+                  placeholder="Search customer by name, email, or phone"
+                  className="flex-1 rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                />
+                <button
+                  type="button"
+                  onClick={() => setAppliedCreditorSearch(creditorSearch.trim())}
+                  className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  Search
+                </button>
+              </div>
+              <label htmlFor={customerSelectId} className="text-xs text-muted-foreground mb-1 block">Link Creditor (optional)</label>
+              <select id={customerSelectId} value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">
+                <option value="">— Walk-in —</option>
+                {creditorResults.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              {selectedCreditor && (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  <p className="truncate">{selectedCreditor.email || "No email"}{selectedCreditor.phone ? ` · ${selectedCreditor.phone}` : ""}</p>
+                  <p className={customerCreditState(selectedCreditor.creditBalance ?? 0).style} style={{ fontFamily: "'DM Mono', monospace" }}>
+                    Credit {defaultCurrencySymbol}{Math.abs(selectedCreditor.creditBalance ?? 0).toFixed(2)} · {customerCreditState(selectedCreditor.creditBalance ?? 0).label}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
           <div className="rounded-xl border border-border bg-white/3 p-3">
             <div className="flex items-center justify-between">
               <div><p className="text-sm font-semibold">Pre-Pay / Deposit</p><p className="text-xs text-muted-foreground">Customer pays upfront; track balance as items are added</p></div>
               <button onClick={() => setPayFirst((v) => !v)} className={`w-11 h-6 rounded-full relative shrink-0 ${payFirst ? "bg-primary" : "bg-white/10"}`}><span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${payFirst ? "left-[22px]" : "left-0.5"}`} /></button>
             </div>
-            {payFirst && <div className="mt-3"><label htmlFor={prepaidInputId} className="text-xs text-muted-foreground mb-1 block">Amount ({zarSymbol})</label><input id={prepaidInputId} type="number" value={prepaidInput} onChange={(e) => setPrepaidInput(e.target.value)} placeholder={`${zarSymbol}0.00`} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" style={{ fontFamily: "'DM Mono', monospace" }} /></div>}
+            {payFirst && <div className="mt-3"><label htmlFor={prepaidInputId} className="text-xs text-muted-foreground mb-1 block">Amount ({defaultCurrencySymbol})</label><input id={prepaidInputId} type="number" value={prepaidInput} onChange={(e) => setPrepaidInput(e.target.value)} placeholder={`${defaultCurrencySymbol}0.00`} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" style={{ fontFamily: "'DM Mono', monospace" }} /></div>}
           </div>
         </div>
         <div className="flex gap-2 mt-5">
@@ -1526,22 +1677,132 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
 // SALES SECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function SalesSection({ sales }: { sales: SaleRecord[] }) {
+export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales: SaleRecord[]; currency: Currency; staff?: StaffMember[]; menu?: MenuItem[] }) {
+  const dayMs = 86400000;
   const allDates = Array.from(new Set(sales.map((s) => dateKey(s.timestamp)))).sort((a, b) => b.localeCompare(a));
+  const allMonths = Array.from(new Set(sales.map((s) => s.timestamp.toISOString().slice(0, 7)))).sort((a, b) => b.localeCompare(a));
+  const staffNameById = new Map(staff.map((s) => [s.id, s.name] as const));
+  const cashierOptions = Array.from(new Set(sales.map((s) => s.staffId))).map((id) => ({
+    id,
+    name: staffNameById.get(id) ?? id,
+  })).sort((a, b) => a.name.localeCompare(b.name));
+  const [filterMode, setFilterMode] = useState<"daily" | "monthly">("daily");
   const [selectedDate, setSelectedDate] = useState("all");
+  const [selectedMonth, setSelectedMonth] = useState("all");
+  const [selectedCashier, setSelectedCashier] = useState("all");
+  const [salesScope, setSalesScope] = useState<"all" | "negative-only">("all");
+  const [quickFilter, setQuickFilter] = useState<"none" | "this-month" | "this-year" | "last-7" | "last-30" | "last-90" | "this-week" | "previous-week">("none");
+  const [trendMetric, setTrendMetric] = useState<"gross-profit" | "net-sales" | "cogs">("gross-profit");
+  const [rangeFrom, setRangeFrom] = useState("");
+  const [rangeTo, setRangeTo] = useState("");
+  const [tableSearch, setTableSearch] = useState("");
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
-  const filtered = selectedDate === "all" ? sales : sales.filter((s) => dateKey(s.timestamp) === selectedDate);
+  const hasRangeSelection = rangeFrom !== "" && rangeTo !== "";
+  const rangeStartKey = hasRangeSelection ? (rangeFrom <= rangeTo ? rangeFrom : rangeTo) : "";
+  const rangeEndKey = hasRangeSelection ? (rangeFrom <= rangeTo ? rangeTo : rangeFrom) : "";
+  const rangeStartDay = rangeStartKey ? new Date(`${rangeStartKey}T00:00:00`) : null;
+  const rangeEndDay = rangeEndKey ? new Date(`${rangeEndKey}T00:00:00`) : null;
+  const rangeStart = rangeStartDay;
+  const rangeEnd = rangeEndDay ? new Date(rangeEndDay.getTime() + dayMs - 1) : null;
+  const rangeActive = !!(rangeStart && rangeEnd);
+  const now = new Date();
+  const todayKey = dateKey(now);
+  const currentMonth = now.toISOString().slice(0, 7);
+  const currentYear = now.getFullYear();
+  const mondayOffset = (now.getDay() + 6) % 7;
+  const thisWeekStart = new Date(now.getTime() - (mondayOffset * dayMs));
+  const previousWeekStart = new Date(thisWeekStart.getTime() - (7 * dayMs));
+  const previousWeekEnd = new Date(thisWeekStart.getTime() - dayMs);
+  const quickRange = (() => {
+    if (quickFilter === "none") return null;
+    if (quickFilter === "this-month") {
+      const firstDay = `${currentMonth}-01`;
+      return { fromKey: firstDay, toKey: todayKey };
+    }
+    if (quickFilter === "this-year") {
+      return { fromKey: `${currentYear}-01-01`, toKey: todayKey };
+    }
+    if (quickFilter === "this-week") {
+      return { fromKey: dateKey(thisWeekStart), toKey: todayKey };
+    }
+    if (quickFilter === "previous-week") {
+      return { fromKey: dateKey(previousWeekStart), toKey: dateKey(previousWeekEnd) };
+    }
+    const days = quickFilter === "last-7" ? 7 : quickFilter === "last-30" ? 30 : 90;
+    const fromDay = new Date(now.getTime() - ((days - 1) * dayMs));
+    return { fromKey: dateKey(fromDay), toKey: todayKey };
+  })();
+  const quickRangeStart = quickRange ? new Date(`${quickRange.fromKey}T00:00:00`) : null;
+  const quickRangeEnd = quickRange ? new Date(`${quickRange.toKey}T23:59:59.999`) : null;
+  const quickRangeActive = !!(quickRangeStart && quickRangeEnd);
+  const effectiveRangeStart = rangeActive ? rangeStart : (quickRangeActive ? quickRangeStart : null);
+  const effectiveRangeEnd = rangeActive ? rangeEnd : (quickRangeActive ? quickRangeEnd : null);
+  const effectiveRangeActive = !!(effectiveRangeStart && effectiveRangeEnd);
+  const effectiveStartKey = rangeActive ? rangeStartKey : (quickRange?.fromKey ?? "");
+  const effectiveEndKey = rangeActive ? rangeEndKey : (quickRange?.toKey ?? "");
+
+  const periodFiltered = effectiveRangeActive
+    ? sales.filter((s) => s.timestamp >= effectiveRangeStart && s.timestamp <= effectiveRangeEnd)
+    : filterMode === "daily"
+      ? (selectedDate === "all" ? sales : sales.filter((s) => dateKey(s.timestamp) === selectedDate))
+      : (selectedMonth === "all" ? sales : sales.filter((s) => s.timestamp.toISOString().slice(0, 7) === selectedMonth));
+  const cashierFiltered = selectedCashier === "all"
+    ? periodFiltered
+    : periodFiltered.filter((s) => s.staffId === selectedCashier);
+  const searchNeedle = tableSearch.trim().toLowerCase();
+  const searchFiltered = searchNeedle
+    ? cashierFiltered.filter((s) => s.tabName.toLowerCase().includes(searchNeedle))
+    : cashierFiltered;
+  const negativeItemIds = new Set(menu.filter((item) => item.stock !== -1 && item.stock < 0).map((item) => item.id));
+  const isNegativeSale = (sale: SaleRecord) => sale.items.some((line) => negativeItemIds.has(line.menuItem.id) || ((line.menuItem.stock ?? 0) < 0 && line.menuItem.stock !== -1));
+  const negativeSalesCount = searchFiltered.filter(isNegativeSale).length;
+  const filtered = salesScope === "negative-only"
+    ? searchFiltered.filter(isNegativeSale)
+    : searchFiltered;
   const sorted = [...filtered].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   const totalRevenue = filtered.reduce((s, r) => s + r.total, 0);
   const totalItems = filtered.reduce((s, r) => s + r.items.reduce((q, i) => q + i.qty, 0), 0);
   const totalTax = filtered.reduce((s, r) => s + r.tax, 0);
+  const totalNetSales = totalRevenue - totalTax;
+  const totalCogs = filtered.reduce((sum, sale) => sum + sale.items.reduce((saleCogs, line) => saleCogs + ((line.menuItem.cost ?? 0) * line.qty), 0), 0);
+  const grossProfit = totalNetSales - totalCogs;
+  const grossMargin = totalNetSales > 0 ? (grossProfit / totalNetSales) * 100 : 0;
+  const avgTicket = filtered.length > 0 ? totalRevenue / filtered.length : 0;
 
   const itemMap: Record<string, { name: string; qty: number; revenue: number }> = {};
   filtered.forEach((sale) => sale.items.forEach((o) => { if (!itemMap[o.menuItem.id]) itemMap[o.menuItem.id] = { name: o.menuItem.name, qty: 0, revenue: 0 }; itemMap[o.menuItem.id].qty += o.qty; itemMap[o.menuItem.id].revenue += o.menuItem.price * o.qty; }));
   const topItems = Object.values(itemMap).sort((a, b) => b.qty - a.qty).slice(0, 5);
+  const maxTopItemQty = topItems[0]?.qty ?? 1;
   const payBreak: Record<string, number> = {};
   filtered.forEach((s) => { payBreak[s.paymentMethod] = (payBreak[s.paymentMethod] ?? 0) + s.total; });
+  const trendLabel = trendMetric === "gross-profit" ? "Gross Profit" : trendMetric === "net-sales" ? "Net Sales" : "COGS";
+  const trendValue = (sale: SaleRecord) => {
+    const saleNet = sale.total - sale.tax;
+    const saleCogs = sale.items.reduce((sum, line) => sum + ((line.menuItem.cost ?? 0) * line.qty), 0);
+    if (trendMetric === "net-sales") return saleNet;
+    if (trendMetric === "cogs") return saleCogs;
+    return saleNet - saleCogs;
+  };
+  const dailyMetricMap: Record<string, { value: number; tx: number }> = {};
+  filtered.forEach((sale) => {
+    const day = dateKey(sale.timestamp);
+    const current = dailyMetricMap[day] ?? { value: 0, tx: 0 };
+    dailyMetricMap[day] = { value: current.value + trendValue(sale), tx: current.tx + 1 };
+  });
+  const dailyMetricTrend = Object.entries(dailyMetricMap)
+    .map(([day, values]) => ({ day, value: values.value, tx: values.tx }))
+    .sort((a, b) => a.day.localeCompare(b.day));
+  const trendMax = dailyMetricTrend.length ? Math.max(...dailyMetricTrend.map((point) => point.value), 0) : 0;
+  const trendMin = dailyMetricTrend.length ? Math.min(...dailyMetricTrend.map((point) => point.value), 0) : 0;
+  const trendSpan = Math.max(trendMax - trendMin, 1);
+  const trendTop = 10;
+  const trendBottom = 130;
+  const trendHeight = trendBottom - trendTop;
+  const trendY = (value: number) => trendTop + ((trendMax - value) / trendSpan) * trendHeight;
+  const trendBaselineY = trendY(0);
+  const trendUsableWidth = 620;
+  const trendStep = dailyMetricTrend.length > 0 ? trendUsableWidth / dailyMetricTrend.length : trendUsableWidth;
 
   function labelDate(k: string) {
     if (k === "all") return "All Time";
@@ -1550,27 +1811,388 @@ export function SalesSection({ sales }: { sales: SaleRecord[] }) {
     return fmtDate(new Date(k + "T12:00:00"));
   }
 
+  function labelMonth(k: string) {
+    if (k === "all") return "All Months";
+    const [year, month] = k.split("-");
+    return new Date(Number(year), Number(month) - 1, 1).toLocaleDateString("en-ZA", { month: "short", year: "numeric" });
+  }
+
+  function labelRange(fromKey: string, toKey: string) {
+    if (!fromKey || !toKey) return "Custom Range";
+    if (fromKey === toKey) return fmtDate(new Date(`${fromKey}T12:00:00`));
+    return `${fmtDate(new Date(`${fromKey}T12:00:00`))} - ${fmtDate(new Date(`${toKey}T12:00:00`))}`;
+  }
+
+  const periodLabel = effectiveRangeActive ? labelRange(effectiveStartKey, effectiveEndKey) : (filterMode === "daily" ? labelDate(selectedDate) : labelMonth(selectedMonth));
+  const comparisonBase = selectedCashier === "all" ? sales : sales.filter((s) => s.staffId === selectedCashier);
+  const effectiveStartDay = effectiveRangeActive ? new Date(`${effectiveStartKey}T00:00:00`) : null;
+  const effectiveEndDay = effectiveRangeActive ? new Date(`${effectiveEndKey}T00:00:00`) : null;
+  const rangeDays = effectiveStartDay && effectiveEndDay ? Math.max(1, Math.floor((effectiveEndDay.getTime() - effectiveStartDay.getTime()) / dayMs) + 1) : 0;
+  const prevStartDay = effectiveStartDay ? new Date(effectiveStartDay.getTime() - (rangeDays * dayMs)) : null;
+  const prevEndDay = effectiveStartDay ? new Date(effectiveStartDay.getTime() - dayMs) : null;
+  const previousRangeLabel = prevStartDay && prevEndDay ? labelRange(dateKey(prevStartDay), dateKey(prevEndDay)) : "";
+  const currentWindowSales = effectiveRangeActive ? comparisonBase.filter((s) => s.timestamp >= effectiveRangeStart && s.timestamp <= effectiveRangeEnd) : [];
+  const previousWindowSales = prevStartDay && prevEndDay
+    ? comparisonBase.filter((s) => s.timestamp >= prevStartDay && s.timestamp <= new Date(prevEndDay.getTime() + dayMs - 1))
+    : [];
+  const currentWindowRevenue = currentWindowSales.reduce((sum, sale) => sum + sale.total, 0);
+  const previousWindowRevenue = previousWindowSales.reduce((sum, sale) => sum + sale.total, 0);
+  const revenueDeltaPercent = previousWindowRevenue > 0
+    ? ((currentWindowRevenue - previousWindowRevenue) / previousWindowRevenue) * 100
+    : null;
+
+  function escapeHtml(value: string) {
+    return value
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function printReport() {
+    const reportLabel = periodLabel;
+    const cashierLabel = selectedCashier === "all" ? "All Cashiers" : (staffNameById.get(selectedCashier) ?? selectedCashier);
+    const popup = window.open("", "_blank", "noopener,noreferrer,width=960,height=760");
+    if (!popup) return;
+
+    const rows = sorted.map((sale) => {
+      const items = sale.items.map((item) => `${item.qty}x ${escapeHtml(item.menuItem.name)}`).join(", ");
+      return `
+        <tr>
+          <td>${escapeHtml(fmtDate(sale.timestamp))} ${escapeHtml(fmtTime(sale.timestamp))}</td>
+          <td>${escapeHtml(sale.tabName)}</td>
+          <td>${escapeHtml(staffNameById.get(sale.staffId) ?? sale.staffId)}</td>
+          <td>${escapeHtml(sale.paymentMethod)}</td>
+          <td>${escapeHtml(items)}</td>
+          <td style="text-align:right">${escapeHtml(fmt(sale.total, currency))}</td>
+        </tr>
+      `;
+    }).join("");
+
+    popup.document.write(`
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>Sales Report</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 24px; color: #111; }
+            h1 { margin: 0 0 6px; }
+            .meta { color: #444; margin-bottom: 18px; font-size: 14px; }
+            .summary { display: flex; gap: 18px; margin-bottom: 18px; font-size: 14px; }
+            .card { border: 1px solid #ddd; border-radius: 8px; padding: 10px 12px; min-width: 140px; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { border: 1px solid #ddd; padding: 8px; font-size: 12px; vertical-align: top; }
+            th { background: #f7f7f7; text-align: left; }
+          </style>
+        </head>
+        <body>
+          <h1>Sales Report</h1>
+          <p class="meta">Period: ${escapeHtml(reportLabel)} | Cashier: ${escapeHtml(cashierLabel)} | Generated: ${escapeHtml(fmtDate(new Date()))} ${escapeHtml(fmtTime(new Date()))}</p>
+          <div class="summary">
+            <div class="card"><strong>Revenue</strong><br/>${escapeHtml(fmt(totalRevenue, currency))}</div>
+            <div class="card"><strong>Transactions</strong><br/>${filtered.length}</div>
+            <div class="card"><strong>Items Sold</strong><br/>${totalItems}</div>
+            <div class="card"><strong>VAT</strong><br/>${escapeHtml(fmt(totalTax, currency))}</div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Tab</th>
+                <th>Cashier</th>
+                <th>Method</th>
+                <th>Items</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows || '<tr><td colspan="6" style="text-align:center">No transactions in this period.</td></tr>'}
+            </tbody>
+          </table>
+          <script>window.print();</script>
+        </body>
+      </html>
+    `);
+    popup.document.close();
+  }
+
   return (
     <div className="max-w-3xl">
       <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
-        <div><h2 className="text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Sales</h2><p className="text-xs text-muted-foreground">{filtered.length} transactions · {labelDate(selectedDate)}</p></div>
-        <div className="flex items-center gap-2"><Calendar size={13} className="text-muted-foreground" /><div className="relative"><select value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"><option value="all">All Time</option>{allDates.map((d) => <option key={d} value={d}>{labelDate(d)}</option>)}</select><ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" /></div></div>
+        <div><h2 className="text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Sales</h2><p className="text-xs text-muted-foreground">{filtered.length} transactions · {periodLabel}</p></div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Calendar size={13} className="text-muted-foreground" />
+          <div className="flex items-center gap-1 rounded-lg border border-border bg-[#1a1510] px-1 py-1">
+            {[
+              { id: "last-7", label: "Last 7 Days" },
+              { id: "this-week", label: "This Week" },
+              { id: "previous-week", label: "Previous Week" },
+            ].map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                aria-label={`Preset ${preset.label}`}
+                onClick={() => setQuickFilter(preset.id as "last-7" | "this-week" | "previous-week")}
+                className={`rounded-md px-2 py-1 text-[10px] font-semibold transition-all ${quickFilter === preset.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/10"}`}
+                style={{ fontFamily: "'DM Mono', monospace" }}
+              >
+                {preset.label}
+              </button>
+            ))}
+            {quickFilter !== "none" && (
+              <button
+                type="button"
+                aria-label="Clear preset filter"
+                onClick={() => setQuickFilter("none")}
+                className="rounded-md px-2 py-1 text-[10px] font-semibold text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all"
+                style={{ fontFamily: "'DM Mono', monospace" }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="relative">
+            <select
+              aria-label="Report granularity"
+              value={filterMode}
+              onChange={(e) => setFilterMode(e.target.value as "daily" | "monthly")}
+              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
+            >
+              <option value="daily">Daily</option>
+              <option value="monthly">Monthly</option>
+            </select>
+            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+          </div>
+          <div className="relative">
+            <select
+              aria-label="Sales scope filter"
+              value={salesScope}
+              onChange={(e) => setSalesScope(e.target.value as "all" | "negative-only")}
+              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
+            >
+              <option value="all">All Sales</option>
+              <option value="negative-only">Negative Sales Only</option>
+            </select>
+            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+          </div>
+          {negativeSalesCount > 0 && (
+            <button
+              type="button"
+              aria-label="Switch to Negative Sales Only"
+              onClick={() => setSalesScope("negative-only")}
+              className="rounded-full border border-red-500/40 bg-red-950/30 px-2 py-1 text-[10px] font-semibold text-red-300 hover:bg-red-950/40 transition-colors"
+              style={{ fontFamily: "'DM Mono', monospace" }}
+            >
+              Negative: {negativeSalesCount}
+            </button>
+          )}
+          <div className="relative">
+            <select
+              aria-label="Cashier filter"
+              value={selectedCashier}
+              onChange={(e) => setSelectedCashier(e.target.value)}
+              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
+            >
+              <option value="all">All Cashiers</option>
+              {cashierOptions.map((cashier) => <option key={cashier.id} value={cashier.id}>{cashier.name}</option>)}
+            </select>
+            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+          </div>
+          <div className="relative">
+            <select
+              aria-label="Quick profit filter"
+              value={quickFilter}
+              onChange={(e) => setQuickFilter(e.target.value as "none" | "this-month" | "this-year" | "last-7" | "last-30" | "last-90" | "this-week" | "previous-week")}
+              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
+            >
+              <option value="none">No quick filter</option>
+              <option value="this-month">This month</option>
+              <option value="this-year">This year</option>
+              <option value="last-7">Past 7 days</option>
+              <option value="this-week">This week</option>
+              <option value="previous-week">Previous week</option>
+              <option value="last-30">Past 30 days</option>
+              <option value="last-90">Past 90 days</option>
+            </select>
+            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+          </div>
+          <div className="relative">
+            <select
+              aria-label="Report period"
+              value={filterMode === "daily" ? selectedDate : selectedMonth}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (filterMode === "daily") setSelectedDate(next);
+                else setSelectedMonth(next);
+              }}
+              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
+            >
+              {filterMode === "daily"
+                ? <>
+                    <option value="all">All Time</option>
+                    {allDates.map((d) => <option key={d} value={d}>{labelDate(d)}</option>)}
+                  </>
+                : <>
+                    <option value="all">All Months</option>
+                    {allMonths.map((m) => <option key={m} value={m}>{labelMonth(m)}</option>)}
+                  </>}
+            </select>
+            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+          </div>
+          <input
+            type="date"
+            aria-label="Range from"
+            value={rangeFrom}
+            onChange={(e) => setRangeFrom(e.target.value)}
+            className="rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+          />
+          <input
+            type="date"
+            aria-label="Range to"
+            value={rangeTo}
+            onChange={(e) => setRangeTo(e.target.value)}
+            className="rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+          />
+          {(rangeFrom || rangeTo) && (
+            <button
+              onClick={() => { setRangeFrom(""); setRangeTo(""); }}
+              className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5"
+            >
+              Clear Range
+            </button>
+          )}
+          <button onClick={printReport} className="rounded-lg border border-border px-3 py-2 text-xs text-foreground hover:bg-white/5 flex items-center gap-1.5">
+            <Printer size={12} />
+            Print Report
+          </button>
+        </div>
+        <div className="w-full sm:w-60">
+          <input
+            aria-label="Search table name"
+            value={tableSearch}
+            onChange={(e) => setTableSearch(e.target.value)}
+            placeholder="Search table name"
+            className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-xs text-foreground focus:outline-none focus:border-primary/50"
+          />
+        </div>
       </div>
-      <div className="grid grid-cols-3 gap-3 mb-5">
-        {[{ label: "Revenue", value: `R${totalRevenue.toFixed(2)}`, icon: TrendingUp, color: "text-primary" }, { label: "Items Sold", value: totalItems.toString(), icon: Package, color: "text-blue-400" }, { label: "VAT", value: `R${totalTax.toFixed(2)}`, icon: Percent, color: "text-amber-400" }].map(({ label, value, icon: Icon, color }) => (
+      {effectiveRangeActive && (
+        <div className="mb-5 rounded-xl border border-border bg-card/30 p-4">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>
+            Window Comparison ({selectedCashier === "all" ? "All Cashiers" : (staffNameById.get(selectedCashier) ?? selectedCashier)})
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+            <div className="rounded-lg bg-white/5 border border-border/60 px-3 py-2">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Current</p>
+              <p className="font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(currentWindowRevenue, currency)}</p>
+              <p className="text-xs text-muted-foreground">{periodLabel} · {currentWindowSales.length} tx</p>
+            </div>
+            <div className="rounded-lg bg-white/5 border border-border/60 px-3 py-2">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Previous</p>
+              <p className="font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(previousWindowRevenue, currency)}</p>
+              <p className="text-xs text-muted-foreground">{previousRangeLabel || "No previous window"} · {previousWindowSales.length} tx</p>
+            </div>
+            <div className="rounded-lg bg-white/5 border border-border/60 px-3 py-2">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Revenue Delta</p>
+              <p className={`font-semibold ${revenueDeltaPercent === null ? "text-muted-foreground" : revenueDeltaPercent >= 0 ? "text-green-400" : "text-red-400"}`} style={{ fontFamily: "'DM Mono', monospace" }}>
+                {revenueDeltaPercent === null ? "N/A" : `${revenueDeltaPercent >= 0 ? "+" : ""}${revenueDeltaPercent.toFixed(1)}%`}
+              </p>
+              <p className="text-xs text-muted-foreground">Current vs previous equal window</p>
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 mb-5">
+        {[
+          { label: "Gross Sales", value: fmt(totalRevenue, currency), icon: TrendingUp, color: "text-primary" },
+          { label: "Net Sales", value: fmt(totalNetSales, currency), icon: BarChart2, color: "text-blue-400" },
+          { label: "COGS", value: fmt(totalCogs, currency), icon: Package, color: "text-amber-400" },
+          { label: "Gross Profit", value: fmt(grossProfit, currency), icon: Wallet, color: grossProfit >= 0 ? "text-green-400" : "text-red-400" },
+          { label: "Gross Margin", value: `${grossMargin.toFixed(1)}%`, icon: Percent, color: grossMargin >= 0 ? "text-green-400" : "text-red-400" },
+          { label: "Avg Ticket", value: fmt(avgTicket, currency), icon: Receipt, color: "text-cyan-400" },
+        ].map(({ label, value, icon: Icon, color }) => (
           <div key={label} className="rounded-xl border border-border bg-card/40 px-4 py-3"><div className="flex items-center gap-1.5 mb-1"><Icon size={12} className={color} /><span className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>{label}</span></div><p className={`text-xl font-bold ${color}`} style={{ fontFamily: "'DM Mono', monospace" }}>{value}</p></div>
         ))}
       </div>
+      <div className="rounded-xl border border-border bg-card/30 p-4 mb-5">
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>{trendLabel} Trend (Daily)</p>
+            <div className="flex items-center gap-1 rounded-lg border border-border bg-[#1a1510] px-1 py-1">
+              {[{ id: "gross-profit", label: "Gross Profit" }, { id: "net-sales", label: "Net Sales" }, { id: "cogs", label: "COGS" }].map((metric) => (
+                <button
+                  key={metric.id}
+                  type="button"
+                  aria-label={`Trend metric ${metric.label}`}
+                  onClick={() => setTrendMetric(metric.id as "gross-profit" | "net-sales" | "cogs")}
+                  className={`rounded-md px-2 py-1 text-[10px] font-semibold transition-all ${trendMetric === metric.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/10"}`}
+                  style={{ fontFamily: "'DM Mono', monospace" }}
+                >
+                  {metric.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Days plotted: {dailyMetricTrend.length}</p>
+        </div>
+        {dailyMetricTrend.length === 0 ? <p className="text-xs text-muted-foreground">No daily trend data in this filter.</p> : (
+          <div className="space-y-2">
+            <svg viewBox="0 0 660 160" role="img" aria-label={`${trendLabel} trend chart`} className="w-full h-44 rounded-lg bg-white/3 border border-border/60 p-2">
+              <line x1={20} y1={trendBaselineY} x2={640} y2={trendBaselineY} stroke="rgba(255,255,255,0.25)" strokeWidth="1" />
+              {dailyMetricTrend.map((point, index) => {
+                const x = 24 + (index * trendStep) + (trendStep * 0.15);
+                const barWidth = Math.max(8, trendStep * 0.7);
+                const y = Math.min(trendY(point.value), trendBaselineY);
+                const barHeight = Math.max(2, Math.abs(trendY(point.value) - trendBaselineY));
+                return (
+                  <g key={point.day}>
+                    <rect x={x} y={y} width={barWidth} height={barHeight} rx={3} fill={point.value >= 0 ? "rgba(74, 222, 128, 0.85)" : "rgba(248, 113, 113, 0.85)"} />
+                    <text x={x + (barWidth / 2)} y={145} textAnchor="middle" fill="rgba(255,255,255,0.65)" fontSize="9">{point.day.slice(5)}</text>
+                  </g>
+                );
+              })}
+            </svg>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
+              {dailyMetricTrend.slice(-6).map((point) => (
+                <div key={`trend-${point.day}`} className="flex items-center justify-between rounded-md border border-border/60 bg-white/3 px-2 py-1">
+                  <span className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{point.day}</span>
+                  <span className={`text-[10px] font-semibold ${point.value >= 0 ? "text-green-400" : "text-red-400"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(point.value, currency)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
       <div className="grid grid-cols-5 gap-4 mb-5">
         <div className="col-span-3 rounded-xl border border-border bg-card/30 p-4">
-          <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Top Items</p>
-          {topItems.length === 0 ? <p className="text-xs text-muted-foreground">No data.</p> : topItems.map((item, i) => (
-            <div key={item.name} className="flex items-center gap-2 mb-2"><span className="text-xs text-muted-foreground w-4 text-right" style={{ fontFamily: "'DM Mono', monospace" }}>{i+1}</span><div className="flex-1"><div className="flex justify-between mb-0.5"><span className="text-xs font-medium">{item.name}</span><span className="text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{item.qty}×</span></div><div className="h-1 rounded-full bg-white/5"><div className="h-full rounded-full bg-primary/60" style={{ width: `${(item.qty / (topItems[0]?.qty || 1)) * 100}%` }} /></div></div></div>
-          ))}
+          <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Fast-Moving Products</p>
+          {topItems.length === 0 ? <p className="text-xs text-muted-foreground">No data.</p> : (
+            <div className="space-y-2">
+              <svg viewBox="0 0 340 170" role="img" aria-label="Fast moving products graph" className="w-full h-44 rounded-lg bg-white/3 border border-border/60 p-2">
+                {topItems.map((item, i) => {
+                  const barHeight = (item.qty / maxTopItemQty) * 120;
+                  const x = 14 + (i * 64);
+                  const y = 145 - barHeight;
+                  return (
+                    <g key={`${item.name}-${i}`}>
+                      <rect x={x} y={y} width={44} height={barHeight} rx={4} fill="rgba(200,130,58,0.85)" />
+                      <text x={x + 22} y={140} textAnchor="middle" fill="rgba(255,255,255,0.65)" fontSize="9">{item.name.slice(0, 8)}</text>
+                      <text x={x + 22} y={Math.max(14, y - 4)} textAnchor="middle" fill="rgba(255,255,255,0.85)" fontSize="9">{item.qty}</text>
+                    </g>
+                  );
+                })}
+              </svg>
+              {topItems.map((item, i) => (
+                <div key={`${item.name}-${i}`} className="flex items-center gap-2"><span className="text-xs text-muted-foreground w-4 text-right" style={{ fontFamily: "'DM Mono', monospace" }}>{i + 1}</span><div className="flex-1"><div className="flex justify-between mb-0.5"><span className="text-xs font-medium">{item.name}</span><span className="text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{item.qty}×</span></div><div className="h-1 rounded-full bg-white/5"><div className="h-full rounded-full bg-primary/60" style={{ width: `${(item.qty / maxTopItemQty) * 100}%` }} /></div></div></div>
+              ))}
+            </div>
+          )}
         </div>
         <div className="col-span-2 rounded-xl border border-border bg-card/30 p-4">
           <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>By Method</p>
-          {Object.entries(payBreak).length === 0 ? <p className="text-xs text-muted-foreground">No data.</p> : Object.entries(payBreak).sort(([,a],[,b]) => b-a).map(([m, amount]) => <div key={m} className="flex justify-between items-center mb-1.5"><span className="text-xs text-muted-foreground truncate">{m}</span><span className="text-xs font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>R{amount.toFixed(0)}</span></div>)}
+          {Object.entries(payBreak).length === 0 ? <p className="text-xs text-muted-foreground">No data.</p> : Object.entries(payBreak).sort(([,a],[,b]) => b-a).map(([m, amount]) => <div key={m} className="flex justify-between items-center mb-1.5"><span className="text-xs text-muted-foreground truncate">{m}</span><span className="text-xs font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(amount, currency)}</span></div>)}
         </div>
       </div>
       <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Transactions</p>
@@ -1584,12 +2206,12 @@ export function SalesSection({ sales }: { sales: SaleRecord[] }) {
               <button onClick={() => setExpandedKey(expandedKey === saleKey ? null : saleKey)} className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/3 transition-colors text-left">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap"><p className="text-sm font-semibold">{sale.tabName}</p><span className="text-[10px] text-muted-foreground bg-white/5 rounded px-1.5 py-0.5">{sale.paymentMethod}</span>{sale.prepaid && <span className="text-[10px] text-green-400 bg-green-400/10 rounded px-1.5 py-0.5">Pre-paid</span>}</div>
-                  <p className="text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmtDate(sale.timestamp)} · {fmtTime(sale.timestamp)}</p>
+                  <p className="text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmtDate(sale.timestamp)} · {fmtTime(sale.timestamp)} · {staffNameById.get(sale.staffId) ?? sale.staffId}</p>
                 </div>
-                <div className="text-right shrink-0"><p className="text-sm font-bold" style={{ fontFamily: "'DM Mono', monospace" }}>R{sale.total.toFixed(2)}</p><p className="text-[10px] text-muted-foreground">{sale.items.reduce((q,i)=>q+i.qty,0)} items</p></div>
+                <div className="text-right shrink-0"><p className="text-sm font-bold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(sale.total, currency)}</p><p className="text-[10px] text-muted-foreground">{sale.items.reduce((q,i)=>q+i.qty,0)} items</p></div>
                 <ChevronDown size={14} className={`text-muted-foreground transition-transform shrink-0 ${expandedKey === saleKey ? "rotate-180" : ""}`} />
               </button>
-              {expandedKey === saleKey && <div className="px-4 pb-3 border-t border-border/50 pt-2 space-y-1">{sale.items.map((o,i) => <div key={i} className="flex justify-between text-xs text-muted-foreground"><span>{o.qty}× {o.menuItem.name}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{(o.menuItem.price*o.qty).toFixed(2)}</span></div>)}{sale.tax > 0 && <div className="flex justify-between text-xs text-muted-foreground border-t border-border/30 pt-1"><span>VAT</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{sale.tax.toFixed(2)}</span></div>}{sale.change != null && <div className="flex justify-between text-xs text-green-400 pt-0.5"><span>Change given</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{sale.change.toFixed(2)}</span></div>}</div>}
+              {expandedKey === saleKey && <div className="px-4 pb-3 border-t border-border/50 pt-2 space-y-1">{sale.items.map((o,i) => <div key={i} className="flex justify-between text-xs text-muted-foreground"><span>{o.qty}× {o.menuItem.name}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price*o.qty, currency)}</span></div>)}{sale.tax > 0 && <div className="flex justify-between text-xs text-muted-foreground border-t border-border/30 pt-1"><span>VAT</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(sale.tax, currency)}</span></div>}{sale.change != null && <div className="flex justify-between text-xs text-green-400 pt-0.5"><span>Change given</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{currency.symbol}{sale.change.toFixed(2)}</span></div>}</div>}
             </div>
           );})}
         </div>
@@ -1632,7 +2254,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   const { config, businessInfo, menu } = tenant;
   const currentStaff = tenant.staff.find((s) => s.id === currentStaffId) ?? null;
   const currentPermissions = currentStaff?.permissions ?? defaultPermissionsForRole(currentStaff?.role ?? "bartender");
-  const emptyProduct = (): MenuItem => ({ id: uid(), name: "", category: config.categories.find((c) => c.enabled)?.name ?? "Cocktails", price: 0, description: "", stock: -1 });
+  const emptyProduct = (): MenuItem => ({ id: uid(), name: "", category: config.categories.find((c) => c.enabled)?.name ?? "Cocktails", price: 0, cost: 0, description: "", stock: -1 });
   const [productForm, setProductForm] = useState<MenuItem>(emptyProduct());
   const [bizForm, setBizForm] = useState<BusinessInfo>({ ...businessInfo });
 
@@ -2160,7 +2782,8 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                 <div className="grid grid-cols-2 gap-3">
                   <div><label className="text-xs text-muted-foreground mb-1 block">Name *</label><input value={productForm.name} onChange={(e) => setProductForm({...productForm, name: e.target.value})} placeholder="Product name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                   <div><label className="text-xs text-muted-foreground mb-1 block">Category</label><select value={productForm.category} onChange={(e) => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{enabledCats.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
-                  <div><label className="text-xs text-muted-foreground mb-1 block">Price (ZAR) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                  <div><label className="text-xs text-muted-foreground mb-1 block">Price ({defaultCurrency(config).code}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                  <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({defaultCurrency(config).code})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                   <div><label className="text-xs text-muted-foreground mb-1 block">Stock (-1 = ∞)</label><input type="number" min="-1" value={productForm.stock} onChange={(e) => setProductForm({...productForm, stock: parseInt(e.target.value)??-1})} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                   <div className="col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                   <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop" className="text-sm text-muted-foreground">Popular</label></div>
@@ -2176,7 +2799,8 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   {items.map((item) => (
                     <div key={item.id} className="flex items-center gap-3 rounded-lg border border-border bg-card/30 px-4 py-2.5 mb-1 hover:bg-card/50">
                       <div className="flex-1 min-w-0"><p className="text-sm font-medium truncate">{item.name}{item.stock===0&&<span className="ml-2 text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded">OUT</span>}{item.popular&&<span className="ml-2 text-[10px] text-primary font-bold">● HOT</span>}</p><p className="text-xs text-muted-foreground truncate">{item.description}</p></div>
-                      <span className="text-sm font-semibold shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>R{item.price.toFixed(2)}</span>
+                      <span className="text-sm font-semibold shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.price, defaultCurrency(config))}</span>
+                      <span className="text-[11px] text-muted-foreground shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>C:{fmt(item.cost ?? 0, defaultCurrency(config))}</span>
                       <span className={`text-xs shrink-0 ${item.stock===0?"text-red-400":item.stock===-1?"text-muted-foreground":"text-green-400"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{item.stock===-1?"∞":`${item.stock}`}</span>
                       <button onClick={() => { setEditingProduct(item); setProductForm({...item}); }} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>
                       <button onClick={() => update({ menu: menu.filter((m) => m.id!==item.id) })} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>
@@ -2264,11 +2888,11 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                 </div>
               )}
               <div className="rounded-xl border border-border bg-card/30 p-4">
-                <p className="text-xs text-muted-foreground mb-2 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Preview on R100</p>
+                <p className="text-xs text-muted-foreground mb-2 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Preview on {fmt(100, defaultCurrency(config))}</p>
                 <div className="space-y-1 text-sm">
-                  <div className="flex justify-between"><span className="text-muted-foreground">Item</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R100.00</span></div>
-                  {config.vatEnabled&&<div className="flex justify-between"><span className="text-muted-foreground">VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{config.vatRate.toFixed(2)}</span></div>}
-                  <div className="flex justify-between font-bold border-t border-border pt-1"><span>Total</span><span className="text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>R{(100+(config.vatEnabled?config.vatRate:0)).toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Item</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(100, defaultCurrency(config))}</span></div>
+                  {config.vatEnabled&&<div className="flex justify-between"><span className="text-muted-foreground">VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(config.vatRate, defaultCurrency(config))}</span></div>}
+                  <div className="flex justify-between font-bold border-t border-border pt-1"><span>Total</span><span className="text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(100+(config.vatEnabled?config.vatRate:0), defaultCurrency(config))}</span></div>
                 </div>
               </div>
             </div>
@@ -2327,17 +2951,17 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   <input value={newCustPhone} onChange={(e)=>setNewCustPhone(e.target.value)} placeholder="Phone" className="rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={()=>{if(!newCustName.trim())return;if(editingCust){update({customers:tenant.customers.map((c)=>c.id===editingCust.id?{...c,name:newCustName.trim(),email:newCustEmail,phone:newCustPhone}:c)});setEditingCust(null);}else{update({customers:[...tenant.customers,{id:uid(),name:newCustName.trim(),email:newCustEmail,phone:newCustPhone,totalSpent:0,visits:0,notes:""}]});}setNewCustName("");setNewCustEmail("");setNewCustPhone("");}} disabled={!newCustName.trim()} className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-30">{editingCust?"Save":"Add"}</button>
+                  <button onClick={()=>{if(!newCustName.trim())return;if(editingCust){update({customers:tenant.customers.map((c)=>c.id===editingCust.id?{...c,name:newCustName.trim(),email:newCustEmail,phone:newCustPhone,creditBalance:c.creditBalance??0}:c)});setEditingCust(null);}else{update({customers:[...tenant.customers,{id:uid(),name:newCustName.trim(),email:newCustEmail,phone:newCustPhone,totalSpent:0,visits:0,notes:"",creditBalance:0}]});}setNewCustName("");setNewCustEmail("");setNewCustPhone("");}} disabled={!newCustName.trim()} className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-30">{editingCust?"Save":"Add"}</button>
                   {editingCust && <button onClick={()=>{setEditingCust(null);setNewCustName("");setNewCustEmail("");setNewCustPhone("");}} className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground">Cancel</button>}
                 </div>
               </div>
               {tenant.customers.length === 0 ? <div className="text-center py-12 text-muted-foreground"><UserCheck size={32} className="mx-auto mb-2 opacity-20" /><p className="text-sm">No customers yet.</p></div> : (
-                <div className="space-y-1.5">{tenant.customers.map((c) => <div key={c.id} className="flex items-center gap-3 rounded-xl border border-border bg-card/30 px-4 py-3"><div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{c.name[0]}</span></div><div className="flex-1 min-w-0"><p className="text-sm font-semibold">{c.name}</p><p className="text-xs text-muted-foreground truncate">{c.email}{c.phone&&` · ${c.phone}`}</p></div><div className="text-right shrink-0"><p className="text-xs font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>R{c.totalSpent.toFixed(0)}</p><p className="text-[10px] text-muted-foreground">{c.visits} visits</p></div><button onClick={()=>{setEditingCust(c);setNewCustName(c.name);setNewCustEmail(c.email);setNewCustPhone(c.phone);}} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button><button onClick={()=>update({customers:tenant.customers.filter((cu)=>cu.id!==c.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button></div>)}</div>
+                <div className="space-y-1.5">{tenant.customers.map((c) => { const credit = c.creditBalance ?? 0; const creditState = customerCreditState(credit); return <div key={c.id} className="flex items-center gap-3 rounded-xl border border-border bg-card/30 px-4 py-3"><div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{c.name[0]}</span></div><div className="flex-1 min-w-0"><p className="text-sm font-semibold">{c.name}</p><p className="text-xs text-muted-foreground truncate">{c.email}{c.phone&&` · ${c.phone}`}</p></div><div className="text-right shrink-0"><p className="text-xs font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(c.totalSpent, defaultCurrency(config))}</p><p className={`text-[10px] ${creditState.style}`} style={{ fontFamily: "'DM Mono', monospace" }}>Credit {defaultCurrency(config).symbol}{Math.abs(credit).toFixed(2)} · {creditState.label}</p><p className="text-[10px] text-muted-foreground">{c.visits} visits</p></div><button onClick={()=>update({customers:tenant.customers.map((cu)=>cu.id===c.id?{...cu,creditBalance:0}:cu)})} className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground">Clear</button><button onClick={()=>{setEditingCust(c);setNewCustName(c.name);setNewCustEmail(c.email);setNewCustPhone(c.phone);}} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button><button onClick={()=>update({customers:tenant.customers.filter((cu)=>cu.id!==c.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button></div>; })}</div>
               )}
             </div>
           )}
 
-          {section === "sales" && <SalesSection sales={tenant.sales} />}
+          {section === "sales" && <SalesSection sales={tenant.sales} currency={defaultCurrency(config)} staff={tenant.staff} menu={tenant.menu} />}
 
           {section === "system" && (
             <div className="max-w-xl">
@@ -2468,7 +3092,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <p className="text-sm font-semibold">Allow Zero Sales</p>
-                    <p className="text-xs text-muted-foreground">Permit checkout when the sale total is R0.00. Turn this off to block zero-value sales.</p>
+                    <p className="text-xs text-muted-foreground">Permit checkout when the sale total is {defaultCurrency(config).symbol}0.00. Turn this off to block zero-value sales.</p>
                   </div>
                   <button onClick={() => updateConfig({ allowZeroSales: !config.allowZeroSales })} className={`w-12 h-6 rounded-full relative shrink-0 ${config.allowZeroSales ? "bg-primary" : "bg-white/10"}`}>
                     <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${config.allowZeroSales ? "left-[26px]" : "left-0.5"}`} />
@@ -2496,12 +3120,13 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; tenant: Tenant; onBack: () => void; }) {
-  const zarCur = tenant.config.currencies.find((c) => c.code === "ZAR")!;
+  const configuredCurrency = defaultCurrency(tenant.config);
   const sub = activeTab ? calcSubtotal(activeTab.orders) : 0;
   const tax = calcTax(sub, tenant.config);
   const total = sub + tax;
+  const totalConverted = total * configuredCurrency.rate;
   const prepaid = activeTab?.prepaid ?? 0;
-  const balance = prepaid - total;
+  const balance = prepaid - totalConverted;
   const [now, setNow] = useState(new Date());
   useEffect(() => { const id = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(id); }, []);
 
@@ -2519,17 +3144,17 @@ function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; t
           <div className="rounded-2xl border border-amber-900/25 bg-card/60 backdrop-blur-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-border flex justify-between items-center">
               <div><p className="text-xs text-muted-foreground tracking-widest uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>Order</p><p className="text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{activeTab.name}</p></div>
-              {prepaid > 0 && <div className="text-right"><p className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Prepaid</p><p className="text-lg font-bold text-green-400" style={{ fontFamily: "'DM Mono', monospace" }}>{zarCur.symbol}{prepaid.toFixed(2)}</p></div>}
+              {prepaid > 0 && <div className="text-right"><p className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Prepaid</p><p className="text-lg font-bold text-green-400" style={{ fontFamily: "'DM Mono', monospace" }}>{configuredCurrency.symbol}{prepaid.toFixed(2)}</p></div>}
             </div>
             <div className="px-6 py-3 max-h-56 overflow-y-auto space-y-2">
-              {activeTab.orders.length === 0 ? <p className="text-sm text-muted-foreground text-center py-6">Your order will appear here…</p> : activeTab.orders.map((o) => <div key={o.menuItem.id} className="flex justify-between"><p className="text-sm font-medium">{o.qty}× {o.menuItem.name}</p><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price * o.qty, zarCur)}</span></div>)}
+              {activeTab.orders.length === 0 ? <p className="text-sm text-muted-foreground text-center py-6">Your order will appear here…</p> : activeTab.orders.map((o) => <div key={o.menuItem.id} className="flex justify-between"><p className="text-sm font-medium">{o.qty}× {o.menuItem.name}</p><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price * o.qty, configuredCurrency)}</span></div>)}
             </div>
             {activeTab.orders.length > 0 && (
               <div className="px-6 py-4 border-t border-border space-y-1 bg-white/2">
-                <div className="flex justify-between text-sm text-muted-foreground"><span>Subtotal</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(sub, zarCur)}</span></div>
-                {tax > 0 && <div className="flex justify-between text-sm text-muted-foreground"><span>VAT</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(tax, zarCur)}</span></div>}
-                <div className="flex justify-between text-lg font-bold text-primary"><span>TOTAL</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(total, zarCur)}</span></div>
-                {prepaid > 0 && <div className={`flex justify-between text-sm font-bold ${balance >= 0 ? "text-green-400" : "text-red-400"}`}><span>{balance >= 0 ? "Change Due" : "Balance Owed"}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{zarCur.symbol}{Math.abs(balance).toFixed(2)}</span></div>}
+                <div className="flex justify-between text-sm text-muted-foreground"><span>Subtotal</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(sub, configuredCurrency)}</span></div>
+                {tax > 0 && <div className="flex justify-between text-sm text-muted-foreground"><span>VAT</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(tax, configuredCurrency)}</span></div>}
+                <div className="flex justify-between text-lg font-bold text-primary"><span>TOTAL</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(total, configuredCurrency)}</span></div>
+                {prepaid > 0 && <div className={`flex justify-between text-sm font-bold ${balance >= 0 ? "text-green-400" : "text-red-400"}`}><span>{balance >= 0 ? "Change Due" : "Balance Owed"}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{configuredCurrency.symbol}{Math.abs(balance).toFixed(2)}</span></div>}
               </div>
             )}
           </div>
@@ -2595,7 +3220,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   const { config, menu } = tenant;
   const staff = tenant.staff.find((s) => s.id === staffId);
   const permissions = staff?.permissions ?? defaultPermissionsForRole(staff?.role ?? "bartender");
-  const zarSymbol = config.currencies.find((c) => c.code === "ZAR")?.symbol ?? "R";
+  const configuredCurrency = defaultCurrency(config);
   const enabledCats = ["All", ...config.categories.filter((c) => c.enabled).map((c) => c.name)];
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
 
@@ -2609,13 +3234,12 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
 
   function getRemainingStock(item: MenuItem, tabsState: Tab[]) {
     if (item.stock === -1) return -1;
-    return Math.max(item.stock - getReservedQty(item.id, tabsState), 0);
+    return item.stock - getReservedQty(item.id, tabsState);
   }
 
   function addToOrder(item: MenuItem) {
     if (!permissions.editOrders || !activeTabId) return;
     setTabs((prev) => {
-      if (getRemainingStock(item, prev) === 0) return prev;
       return prev.map((tab) => {
       if (tab.id !== activeTabId) return tab;
       const existing = tab.orders.find((o) => o.menuItem.id === item.id);
@@ -2628,10 +3252,6 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   function changeQty(tabId: string, itemId: string, delta: number) {
     if (!permissions.editOrders) return;
     setTabs((prev) => {
-      if (delta > 0) {
-        const item = menu.find((menuItem) => menuItem.id === itemId);
-        if (!item || getRemainingStock(item, prev) === 0) return prev;
-      }
       return prev.map((tab) => { if (tab.id !== tabId) return tab; return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === itemId ? { ...o, qty: o.qty + delta } : o).filter((o) => o.qty > 0) }; });
     });
   }
@@ -2658,10 +3278,26 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
       if (item.stock === -1) return item;
       const soldQty = soldQtyByItem[item.id] ?? 0;
       if (!soldQty) return item;
-      return { ...item, stock: Math.max(item.stock - soldQty, 0) };
+      return { ...item, stock: item.stock - soldQty };
     });
     let updated = { ...tenant, menu: nextMenu, sales: [sale, ...tenant.sales] };
-    if (sale.customerId) updated.customers = tenant.customers.map((c) => c.id === sale.customerId ? { ...c, totalSpent: c.totalSpent + sale.total, visits: c.visits + 1 } : c);
+    if (sale.customerId) {
+      const creditDelta = sale.accountAction === "on-account"
+        ? -sale.totalConverted
+        : sale.accountAction === "settlement"
+          ? (sale.accountAmount ?? sale.totalConverted)
+          : sale.accountAction === "deposit"
+            ? (sale.accountAmount ?? sale.totalConverted)
+            : (sale.prepaid ?? 0) - sale.totalConverted;
+      updated.customers = tenant.customers.map((c) => c.id === sale.customerId
+        ? {
+          ...c,
+          totalSpent: c.totalSpent + sale.total,
+          visits: c.visits + 1,
+          creditBalance: roundMoney((c.creditBalance ?? 0) + creditDelta),
+        }
+        : c);
+    }
     onSalePersisted(sale, updated);
     if (payingTab) closeTabById(payingTab.id);
     setPayingTab(null);
@@ -2671,8 +3307,9 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   const subtotal = activeTab ? calcSubtotal(activeTab.orders) : 0;
   const tax = calcTax(subtotal, config);
   const total = subtotal + tax;
+  const totalConverted = total * configuredCurrency.rate;
   const prepaid = activeTab?.prepaid ?? 0;
-  const balance = prepaid > 0 ? prepaid - total : 0;
+  const balance = prepaid > 0 ? prepaid - totalConverted : 0;
 
   return (
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-background text-foreground select-none" style={{ fontFamily: "'Barlow', sans-serif" }}>
@@ -2697,8 +3334,8 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
           <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
             {tabs.map((tab) => { const isActive = tab.id === activeTabId; const s = calcSubtotal(tab.orders); const t = s + calcTax(s, config); const pp = tab.prepaid ?? 0; return (
               <button key={tab.id} onClick={()=>setActiveTabId(tab.id)} className={`w-full text-left rounded-lg px-3 py-2.5 transition-all ${isActive?"bg-primary/15 border border-primary/25":"border border-transparent hover:bg-white/5"}`}>
-                <div className="flex items-start justify-between"><span className={`text-sm font-semibold truncate ${isActive?"text-primary":"text-foreground"}`}>{tab.name}</span>{pp>0&&<span className="text-[9px] text-green-400 font-bold ml-1 shrink-0">PP</span>}</div>
-                <div className="flex justify-between mt-0.5"><span className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{elapsed(tab.opened)}</span><span className="text-[11px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{t.toFixed(0)}</span></div>
+                <div className="flex items-start justify-between"><span className={`text-sm font-semibold truncate ${isActive?"text-primary":"text-foreground"}`}>{tab.name}</span><div className="flex items-center gap-1">{tab.customerId&&<span className="text-[9px] text-amber-300 font-bold ml-1 shrink-0">CR</span>}{pp>0&&<span className="text-[9px] text-green-400 font-bold ml-1 shrink-0">PP</span>}</div></div>
+                <div className="flex justify-between mt-0.5"><span className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{elapsed(tab.opened)}</span><span className="text-[11px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(t, configuredCurrency)}</span></div>
               </button>
             ); })}
             {tabs.length === 0 && <p className="text-xs text-muted-foreground text-center py-8 px-2">No open tabs.</p>}
@@ -2717,20 +3354,27 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
               {filtered.map((item) => {
                 const remainingStock = getRemainingStock(item, tabs);
                 const oos = item.stock !== -1 && remainingStock === 0;
+                const negativeSales = item.stock !== -1 && remainingStock < 0;
                 const oqty = activeTab?.orders.find((o) => o.menuItem.id === item.id)?.qty ?? 0;
-                const dis = !activeTabId || oos || !permissions.editOrders;
+                const dis = !activeTabId || !permissions.editOrders;
                 return (
                   <button key={item.id} onClick={()=>!dis&&addToOrder(item)} disabled={dis}
-                    className={`group relative text-left rounded-xl border p-3.5 transition-all active:scale-[0.97] ${oos?"border-red-500/40 bg-red-950/20 ring-1 ring-red-500/30 cursor-not-allowed":dis?"border-border/50 bg-card/40 opacity-50 cursor-not-allowed":"border-border bg-card hover:border-primary/30 hover:bg-primary/5 cursor-pointer"}`}>
-                    {item.popular&&!oos&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-primary/80 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>HOT</span>}
-                    {oos&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-red-300 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>OUT OF STOCK</span>}
-                    {oqty>0&&!oos&&<span className="absolute top-2.5 right-2.5 w-5 h-5 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center">{oqty}</span>}
+                    className={`group relative text-left rounded-xl border p-3.5 transition-all active:scale-[0.97] ${negativeSales ? "border-red-500/50 bg-red-950/25 ring-1 ring-red-500/40" : oos ? "border-amber-500/40 bg-amber-950/20 ring-1 ring-amber-500/30" : dis ? "border-border/50 bg-card/40 opacity-50 cursor-not-allowed" : "border-border bg-card hover:border-primary/30 hover:bg-primary/5 cursor-pointer"}`}>
+                    {item.popular&&!negativeSales&&!oos&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-primary/80 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>HOT</span>}
+                    {negativeSales&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-red-300 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>NEGATIVE SALES</span>}
+                    {oos&&!negativeSales&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-amber-300 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>ZERO STOCK</span>}
+                    {oqty>0&&!negativeSales&&!oos&&<span className="absolute top-2.5 right-2.5 w-5 h-5 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center">{oqty}</span>}
                     <p className="text-sm font-semibold text-foreground pr-6 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "0.92rem" }}>{item.name}</p>
                     <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-1">{item.description}</p>
                     <div className="flex items-end justify-between mt-2">
-                      <p className="text-sm font-bold text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{item.price.toFixed(2)}</p>
-                      {item.stock!==-1&&<p className={`text-[10px] ${oos?"text-red-300 font-semibold":"text-muted-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{oos?"Out of stock":`${remainingStock} left`}</p>}
+                      <p className="text-sm font-bold text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.price, configuredCurrency)}</p>
+                      {item.stock!==-1&&<p className={`text-[10px] ${negativeSales ? "text-red-300 font-semibold" : oos ? "text-amber-300 font-semibold" : "text-muted-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{negativeSales ? `${Math.abs(remainingStock)} below stock` : oos ? "0 left" : `${remainingStock} left`}</p>}
                     </div>
+                    {negativeSales && (
+                      <p className="mt-1 text-[10px] text-red-300" style={{ fontFamily: "'DM Mono', monospace" }}>
+                        Cashier alert: this product is on negative sales.
+                      </p>
+                    )}
                   </button>
                 );
               })}
@@ -2749,29 +3393,42 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
               </div>
               {activeTab.prepaid && activeTab.prepaid > 0 && (
                 <div className={`mx-3 mt-2 rounded-lg px-3 py-2 text-xs flex items-center justify-between ${balance>=0?"bg-green-400/10 border border-green-400/20":"bg-red-400/10 border border-red-400/20"}`}>
-                  <span className="text-muted-foreground">Prepaid {zarSymbol}{activeTab.prepaid.toFixed(2)}</span>
-                  <span className={`font-bold ${balance>=0?"text-green-400":"text-red-400"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{balance>=0?`${zarSymbol}${balance.toFixed(2)} bal`:`${zarSymbol}${Math.abs(balance).toFixed(2)} owed`}</span>
+                  <span className="text-muted-foreground">Prepaid {configuredCurrency.symbol}{activeTab.prepaid.toFixed(2)}</span>
+                  <span className={`font-bold ${balance>=0?"text-green-400":"text-red-400"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{balance>=0?`${configuredCurrency.symbol}${balance.toFixed(2)} bal`:`${configuredCurrency.symbol}${Math.abs(balance).toFixed(2)} owed`}</span>
                 </div>
               )}
               <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
                 {activeTab.orders.length === 0 ? <div className="text-center py-10"><ShoppingBag size={26} className="text-muted-foreground/25 mx-auto mb-2" /><p className="text-xs text-muted-foreground">No items yet.</p></div> :
                   activeTab.orders.map((o) => (
-                    <div key={o.menuItem.id} className="flex items-center gap-2 rounded-lg bg-white/3 border border-white/5 px-3 py-2">
-                      <div className="flex-1 min-w-0"><p className="text-xs font-medium truncate">{o.menuItem.name}</p><p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{o.menuItem.price.toFixed(2)} ea</p></div>
+                    <div key={o.menuItem.id} className={`flex items-center gap-2 rounded-lg px-3 py-2 ${(() => {
+                      const tracked = menu.find((menuItem) => menuItem.id === o.menuItem.id);
+                      if (!tracked || tracked.stock === -1) return "bg-white/3 border border-white/5";
+                      const remaining = getRemainingStock(tracked, tabs);
+                      return remaining < 0 ? "bg-red-950/20 border border-red-500/25" : "bg-white/3 border border-white/5";
+                    })()}`}>
+                      <div className="flex-1 min-w-0"><p className="text-xs font-medium truncate">{o.menuItem.name}</p><p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price, configuredCurrency)} ea</p></div>
                       <div className="flex items-center gap-1 shrink-0">
                         <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Minus size={9} /></button>
                         <span className="text-xs font-bold w-4 text-center" style={{ fontFamily: "'DM Mono', monospace" }}>{o.qty}</span>
-                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders || (() => { const item = menu.find((menuItem) => menuItem.id === o.menuItem.id); return item ? getRemainingStock(item, tabs) === 0 : true; })()} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
+                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders || (() => { const item = menu.find((menuItem) => menuItem.id === o.menuItem.id); return !item; })()} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
                       </div>
-                      <span className="text-xs font-semibold w-12 text-right shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{(o.menuItem.price*o.qty).toFixed(0)}</span>
+                      <span className="text-xs font-semibold w-12 text-right shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price*o.qty, configuredCurrency)}</span>
                     </div>
                   ))}
               </div>
+              {activeTab.orders.some((o) => {
+                const tracked = menu.find((item) => item.id === o.menuItem.id);
+                return !!tracked && tracked.stock !== -1 && getRemainingStock(tracked, tabs) < 0;
+              }) && (
+                <div className="mx-3 mt-1 rounded-lg border border-red-500/30 bg-red-950/20 px-3 py-2 text-xs text-red-300 flex items-center gap-1.5">
+                  <AlertCircle size={12} /> Cashier notice: one or more products are on negative sales.
+                </div>
+              )}
               {activeTab.orders.length > 0 && (
                 <div className="px-3 py-2 border-t border-border space-y-0.5 shrink-0">
-                  <div className="flex justify-between text-xs text-muted-foreground px-1"><span>Subtotal</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{subtotal.toFixed(2)}</span></div>
-                  {config.vatEnabled && <div className="flex justify-between text-xs text-muted-foreground px-1"><span>VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{tax.toFixed(2)}</span></div>}
-                  <div className="flex justify-between text-sm font-bold px-1 pt-1 border-t border-border"><span>Total</span><span className="text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{zarSymbol}{total.toFixed(2)}</span></div>
+                  <div className="flex justify-between text-xs text-muted-foreground px-1"><span>Subtotal</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(subtotal, configuredCurrency)}</span></div>
+                  {config.vatEnabled && <div className="flex justify-between text-xs text-muted-foreground px-1"><span>VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(tax, configuredCurrency)}</span></div>}
+                  <div className="flex justify-between text-sm font-bold px-1 pt-1 border-t border-border"><span>Total</span><span className="text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(total, configuredCurrency)}</span></div>
                 </div>
               )}
               <div className="px-3 pb-4 pt-2 shrink-0">
