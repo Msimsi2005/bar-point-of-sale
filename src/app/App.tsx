@@ -1382,8 +1382,10 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
   const [cashInput, setCashInput] = useState(tab.prepaid ? String(tab.prepaid) : "");
   const [accountMode, setAccountMode] = useState<"purchase" | "on-account" | "settlement" | "deposit">("purchase");
   const [accountAmountInput, setAccountAmountInput] = useState("");
+  const [selectedCustomerId, setSelectedCustomerId] = useState(tab.customerId ?? "");
   const accountAmountInputId = "payment-account-amount";
   const cashTenderedInputId = "payment-cash-tendered";
+  const checkoutCreditorId = "checkout-creditor-select";
 
   useEffect(() => {
     if (!enabledMethods.length) {
@@ -1400,21 +1402,23 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
   const tax = calcTax(subtotal, config);
   const total = subtotal + tax;
   const totalConverted = total * currency.rate;
-  const customer = tenant.customers.find((c) => c.id === tab.customerId) ?? null;
+  const customer = tenant.customers.find((c) => c.id === selectedCustomerId) ?? null;
   const accountAmount = Math.max(0, parseFloat(accountAmountInput) || 0);
   const cashAmount = parseFloat(cashInput) || 0;
   const isSettlement = accountMode === "settlement";
   const isDeposit = accountMode === "deposit";
   const isOnAccount = accountMode === "on-account";
+  const hasLinkedCreditor = !!selectedCustomerId;
   const saleAmount = isSettlement || isDeposit ? accountAmount : totalConverted;
   const change = cashAmount - saleAmount;
   const isCash = method === "cash";
-  const hasChargeableTotal = config.allowZeroSales || total > 0 || !!tab.customerId;
+  const hasChargeableTotal = config.allowZeroSales || total > 0 || !!selectedCustomerId;
   const hasValidModeAmount = isSettlement || isDeposit ? accountAmount > 0 : hasChargeableTotal;
   const methodAllowed = isOnAccount ? true : enabledMethods.length > 0;
-  const canCharge = methodAllowed && hasValidModeAmount && (!isCash || isOnAccount || cashAmount >= saleAmount);
+  const canCharge = methodAllowed && hasValidModeAmount && (!isOnAccount || hasLinkedCreditor) && (!isCash || isOnAccount || cashAmount >= saleAmount);
 
   function handleCharge() {
+    if (isOnAccount && !hasLinkedCreditor) return;
     const paymentLabel = isOnAccount
       ? "On Account"
       : enabledMethods.find((m) => m.id === method)?.name ?? method;
@@ -1435,7 +1439,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
       totalConverted: saleAmount,
       paymentMethod: paymentLabel,
       currencyCode: currency.code, currencySymbol: currency.symbol,
-      timestamp: new Date(), staffId, prepaid: tab.prepaid, customerId: tab.customerId,
+      timestamp: new Date(), staffId, prepaid: tab.prepaid, customerId: selectedCustomerId || undefined,
       change: isCash && cashAmount > saleAmount ? parseFloat((cashAmount - saleAmount).toFixed(2)) : undefined,
       accountAction,
       accountAmount: saleAmount,
@@ -1474,21 +1478,48 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
               </div>
             )}
           </div>
-          {tab.customerId && (
-            <div className="px-6 mb-4">
+          <div className="px-6 mb-4">
               <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Account Handling</p>
               <div className="grid grid-cols-2 gap-1.5">
                 {[{ id: "purchase", label: "Purchase" }, { id: "on-account", label: "On Account" }, { id: "settlement", label: "Settlement" }, { id: "deposit", label: "Deposit Top-up" }].map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => setAccountMode(opt.id as "purchase" | "on-account" | "settlement" | "deposit")}
-                    className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all ${accountMode === opt.id ? "bg-primary text-primary-foreground" : "bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"}`}
-                  >
-                    {opt.label}
-                  </button>
+                  (() => {
+                    const isLocked = opt.id === "on-account" && !hasLinkedCreditor;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        disabled={isLocked}
+                        title={isLocked ? "Link a creditor first to allow on-account purchases." : undefined}
+                        onClick={() => setAccountMode(opt.id as "purchase" | "on-account" | "settlement" | "deposit")}
+                        className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all ${accountMode === opt.id ? "bg-primary text-primary-foreground" : "bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"} ${isLocked ? "opacity-40 cursor-not-allowed hover:bg-white/5 hover:text-muted-foreground" : ""}`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })()
                 ))}
               </div>
+              {!hasLinkedCreditor && (
+                <p className="mt-2 text-[10px] text-amber-300" style={{ fontFamily: "'DM Mono', monospace" }}>
+                  Link a creditor to enable on-account (negative) purchasing.
+                </p>
+              )}
+              {!hasLinkedCreditor && tenant.customers.length > 0 && (
+                <div className="mt-2">
+                  <label htmlFor={checkoutCreditorId} className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2 block" style={{ fontFamily: "'DM Mono', monospace" }}>
+                    Link Creditor For This Checkout
+                  </label>
+                  <select
+                    id={checkoutCreditorId}
+                    value={selectedCustomerId}
+                    onChange={(e) => setSelectedCustomerId(e.target.value)}
+                    className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                  >
+                    <option value="">Select creditor</option>
+                    {tenant.customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+              )}
               {(isSettlement || isDeposit) && (
                 <div className="mt-2">
                   <label htmlFor={accountAmountInputId} className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2 block" style={{ fontFamily: "'DM Mono', monospace" }}>
@@ -1507,7 +1538,6 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
                 </div>
               )}
             </div>
-          )}
           <div className="px-6 mb-4">
             <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Payment Method</p>
             {enabledMethods.length === 0 && !isOnAccount ? (
@@ -1641,9 +1671,12 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
                   Search
                 </button>
               </div>
+              <p className="text-[10px] text-muted-foreground mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>
+                Only linked creditors can purchase on account (negative purchasing).
+              </p>
               <label htmlFor={customerSelectId} className="text-xs text-muted-foreground mb-1 block">Link Creditor (optional)</label>
               <select id={customerSelectId} value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">
-                <option value="">— Walk-in —</option>
+                <option value="">— No Creditor Linked —</option>
                 {creditorResults.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
               {selectedCreditor && (
@@ -2236,6 +2269,8 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   const [newCatName, setNewCatName] = useState(""); const [newPayName, setNewPayName] = useState(""); const [newPayIcon, setNewPayIcon] = useState("card");
   const [newStaffName, setNewStaffName] = useState(""); const [newStaffPin, setNewStaffPin] = useState(""); const [newStaffRole, setNewStaffRole] = useState<StaffMember["role"]>("bartender");
   const [newCustName, setNewCustName] = useState(""); const [newCustEmail, setNewCustEmail] = useState(""); const [newCustPhone, setNewCustPhone] = useState(""); const [editingCust, setEditingCust] = useState<Customer | null>(null);
+  const [editingBalanceCustomerId, setEditingBalanceCustomerId] = useState<string | null>(null);
+  const [editingBalanceInput, setEditingBalanceInput] = useState("");
   const [newPrinterName, setNewPrinterName] = useState("");
   const [newPrinterConnection, setNewPrinterConnection] = useState<HardwareDevice["connection"]>("usb");
   const [newPrinterTarget, setNewPrinterTarget] = useState("");
@@ -2277,6 +2312,25 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
     if (!productForm.name.trim() || productForm.price <= 0) return;
     const newMenu = editingProduct ? menu.map((m) => m.id === editingProduct.id ? productForm : m) : [...menu, { ...productForm, id: uid() }];
     update({ menu: newMenu }); setEditingProduct(null); setProductForm(emptyProduct());
+  }
+
+  function startBalanceEdit(customerId: string) {
+    const customer = tenant.customers.find((c) => c.id === customerId);
+    if (!customer) return;
+    setEditingBalanceCustomerId(customerId);
+    setEditingBalanceInput((customer.creditBalance ?? 0).toFixed(2));
+  }
+
+  function cancelBalanceEdit() {
+    setEditingBalanceCustomerId(null);
+    setEditingBalanceInput("");
+  }
+
+  function saveBalanceEdit(customerId: string) {
+    const nextBalance = Number.parseFloat(editingBalanceInput.trim());
+    if (!Number.isFinite(nextBalance)) return;
+    update({ customers: tenant.customers.map((c) => c.id === customerId ? { ...c, creditBalance: roundMoney(nextBalance) } : c) });
+    cancelBalanceEdit();
   }
 
   function openReceiveStockSession() {
@@ -2956,7 +3010,44 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                 </div>
               </div>
               {tenant.customers.length === 0 ? <div className="text-center py-12 text-muted-foreground"><UserCheck size={32} className="mx-auto mb-2 opacity-20" /><p className="text-sm">No customers yet.</p></div> : (
-                <div className="space-y-1.5">{tenant.customers.map((c) => { const credit = c.creditBalance ?? 0; const creditState = customerCreditState(credit); return <div key={c.id} className="flex items-center gap-3 rounded-xl border border-border bg-card/30 px-4 py-3"><div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{c.name[0]}</span></div><div className="flex-1 min-w-0"><p className="text-sm font-semibold">{c.name}</p><p className="text-xs text-muted-foreground truncate">{c.email}{c.phone&&` · ${c.phone}`}</p></div><div className="text-right shrink-0"><p className="text-xs font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(c.totalSpent, defaultCurrency(config))}</p><p className={`text-[10px] ${creditState.style}`} style={{ fontFamily: "'DM Mono', monospace" }}>Credit {defaultCurrency(config).symbol}{Math.abs(credit).toFixed(2)} · {creditState.label}</p><p className="text-[10px] text-muted-foreground">{c.visits} visits</p></div><button onClick={()=>update({customers:tenant.customers.map((cu)=>cu.id===c.id?{...cu,creditBalance:0}:cu)})} className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground">Clear</button><button onClick={()=>{setEditingCust(c);setNewCustName(c.name);setNewCustEmail(c.email);setNewCustPhone(c.phone);}} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button><button onClick={()=>update({customers:tenant.customers.filter((cu)=>cu.id!==c.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button></div>; })}</div>
+                <div className="space-y-1.5">
+                  {tenant.customers.map((c) => {
+                    const credit = c.creditBalance ?? 0;
+                    const creditState = customerCreditState(credit);
+                    const isEditingBalance = editingBalanceCustomerId === c.id;
+                    return (
+                      <div key={c.id} className="flex items-center gap-3 rounded-xl border border-border bg-card/30 px-4 py-3">
+                        <div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{c.name[0]}</span></div>
+                        <div className="flex-1 min-w-0"><p className="text-sm font-semibold">{c.name}</p><p className="text-xs text-muted-foreground truncate">{c.email}{c.phone&&` · ${c.phone}`}</p></div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(c.totalSpent, defaultCurrency(config))}</p>
+                          <p className={`text-[10px] ${creditState.style}`} style={{ fontFamily: "'DM Mono', monospace" }}>Credit {defaultCurrency(config).symbol}{Math.abs(credit).toFixed(2)} · {creditState.label}</p>
+                          <p className="text-[10px] text-muted-foreground">{c.visits} visits</p>
+                        </div>
+                        {isEditingBalance ? (
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              aria-label={`Balance for ${c.name}`}
+                              type="number"
+                              step="0.01"
+                              value={editingBalanceInput}
+                              onChange={(e) => setEditingBalanceInput(e.target.value)}
+                              className="w-24 rounded border border-border bg-white/5 px-2 py-1 text-[10px] text-foreground focus:outline-none focus:border-primary/50"
+                              style={{ fontFamily: "'DM Mono', monospace" }}
+                            />
+                            <button onClick={() => saveBalanceEdit(c.id)} disabled={!editingBalanceInput.trim()} className="rounded border border-primary/40 px-2 py-1 text-[10px] text-primary hover:bg-primary/10 disabled:opacity-40">Save</button>
+                            <button onClick={cancelBalanceEdit} className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground">Cancel</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => startBalanceEdit(c.id)} className="rounded border border-primary/30 px-2 py-1 text-[10px] text-primary hover:bg-primary/10">Update Balance</button>
+                        )}
+                        <button onClick={()=>update({customers:tenant.customers.map((cu)=>cu.id===c.id?{...cu,creditBalance:0}:cu)})} className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground">Clear</button>
+                        <button onClick={()=>{setEditingCust(c);setNewCustName(c.name);setNewCustEmail(c.email);setNewCustPhone(c.phone);}} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>
+                        <button onClick={()=>update({customers:tenant.customers.filter((cu)=>cu.id!==c.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
           )}

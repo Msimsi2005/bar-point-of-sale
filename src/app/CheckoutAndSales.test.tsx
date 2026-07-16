@@ -179,6 +179,32 @@ describe("PaymentModal", () => {
     randomUuid.mockRestore();
   });
 
+  it("allows linking a creditor in checkout before posting on account", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn();
+    const randomUuid = vi.spyOn(crypto, "randomUUID").mockReturnValue("sale-uuid-4b");
+
+    render(<PaymentModal tab={tab as never} tenant={tenantWithCustomer as never} staffId="staff-1" onClose={() => {}} onComplete={onComplete} />);
+
+    const onAccountButton = screen.getByRole("button", { name: "On Account" });
+    expect(onAccountButton).toBeDisabled();
+
+    await user.selectOptions(screen.getByLabelText("Link Creditor For This Checkout"), "customer-1");
+    expect(onAccountButton).toBeEnabled();
+
+    await user.click(onAccountButton);
+    await user.click(screen.getByRole("button", { name: /POST R115\.00 TO ACCOUNT/i }));
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledWith(expect.objectContaining({
+      id: "sale-uuid-4b",
+      accountAction: "on-account",
+      customerId: "customer-1",
+      totalConverted: 115,
+    })));
+
+    randomUuid.mockRestore();
+  });
+
   it("creates settlement transactions that reduce debt", async () => {
     const user = userEvent.setup();
     const onComplete = vi.fn();
