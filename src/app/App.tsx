@@ -127,6 +127,7 @@ interface BusinessInfo {
 interface MenuItem {
   id: string; name: string; category: string; price: number;
   description: string; stock: number; cost?: number; popular?: boolean;
+  currencyCode?: string;
 }
 
 interface OrderItem { menuItem: MenuItem; qty: number; }
@@ -154,6 +155,10 @@ interface StockMovementLine {
   damaged: number;
   net: number;
   nextStock: number;
+  newPrice?: number;
+  currencyCode?: string;
+  batchNo?: string;
+  expiryDate?: string;
 }
 
 interface StockMovementRecord {
@@ -523,6 +528,10 @@ function rowToTenant(row: any): Tenant {
                 damaged: Number(rawLine.damaged ?? 0),
                 net: Number(rawLine.net ?? 0),
                 nextStock: Number(rawLine.nextStock ?? 0),
+                newPrice: rawLine.newPrice !== undefined ? Number(rawLine.newPrice) : undefined,
+                currencyCode: rawLine.currencyCode !== undefined ? String(rawLine.currencyCode) : undefined,
+                batchNo: rawLine.batchNo !== undefined ? String(rawLine.batchNo) : undefined,
+                expiryDate: rawLine.expiryDate !== undefined ? String(rawLine.expiryDate) : undefined,
               } as StockMovementLine;
             })
             .filter((line): line is StockMovementLine => line !== null)
@@ -2268,7 +2277,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   const [expandedStockMovementId, setExpandedStockMovementId] = useState<string | null>(null);
   const [stockHistoryRange, setStockHistoryRange] = useState<"today" | "7d" | "all">("all");
   const [stockHistoryQuery, setStockHistoryQuery] = useState("");
-  const [stockSession, setStockSession] = useState<Record<string, { received: number; damaged: number }>>({});
+  const [stockSession, setStockSession] = useState<Record<string, { received: number; damaged: number; newPrice?: number; currencyCode?: string; batchNo?: string; expiryDate?: string }>>({});
   const [bizSaved, setBizSaved] = useState(false);
   const [newCatName, setNewCatName] = useState(""); const [newPayName, setNewPayName] = useState(""); const [newPayIcon, setNewPayIcon] = useState("card");
   const [newStaffName, setNewStaffName] = useState(""); const [newStaffPin, setNewStaffPin] = useState(""); const [newStaffRole, setNewStaffRole] = useState<StaffMember["role"]>("bartender");
@@ -2293,7 +2302,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   const { config, businessInfo, menu } = tenant;
   const currentStaff = tenant.staff.find((s) => s.id === currentStaffId) ?? null;
   const currentPermissions = currentStaff?.permissions ?? defaultPermissionsForRole(currentStaff?.role ?? "bartender");
-  const emptyProduct = (): MenuItem => ({ id: uid(), name: "", category: config.categories.find((c) => c.enabled)?.name ?? "Cocktails", price: 0, cost: 0, description: "", stock: -1 });
+  const emptyProduct = (): MenuItem => ({ id: uid(), name: "", category: config.categories.find((c) => c.enabled)?.name ?? "Cocktails", price: 0, cost: 0, description: "", stock: -1, currencyCode: config.defaultCurrencyCode });
   const [productForm, setProductForm] = useState<MenuItem>(emptyProduct());
   const [bizForm, setBizForm] = useState<BusinessInfo>({ ...businessInfo });
 
@@ -2338,10 +2347,10 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   }
 
   function openReceiveStockSession() {
-    const sessionRows: Record<string, { received: number; damaged: number }> = {};
+    const sessionRows: Record<string, { received: number; damaged: number; newPrice?: number; currencyCode?: string; batchNo?: string; expiryDate?: string }> = {};
     menu.forEach((item) => {
       if (item.stock !== -1) {
-        sessionRows[item.id] = { received: 0, damaged: 0 };
+        sessionRows[item.id] = { received: 0, damaged: 0, newPrice: item.price, currencyCode: item.currencyCode ?? config.defaultCurrencyCode, batchNo: "", expiryDate: "" };
       }
     });
     setStockSession(sessionRows);
@@ -2367,8 +2376,12 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
         damaged,
         net,
         nextStock,
+        newPrice: row.newPrice,
+        currencyCode: row.currencyCode,
+        batchNo: row.batchNo,
+        expiryDate: row.expiryDate,
       });
-      return { ...item, stock: nextStock };
+      return { ...item, stock: nextStock, price: row.newPrice ?? item.price, currencyCode: row.currencyCode ?? item.currencyCode };
     });
 
     if (changedLines.length === 0) return;
@@ -2668,57 +2681,114 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                 )}
               </div>
 
-              {showReceiveStock && !editingProduct && (
-                <div className="rounded-xl border border-primary/25 bg-primary/5 p-5 mb-5">
-                  <div className="flex items-start justify-between gap-3 mb-4">
-                    <div>
-                      <p className="text-sm font-bold text-primary">Receive Stock Session</p>
-                      <p className="text-xs text-muted-foreground">Enter received and damaged quantities. Net stock change is received minus damaged.</p>
-                    </div>
-                    <button onClick={() => { setShowReceiveStock(false); setStockSession({}); }} className="rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground">Close</button>
-                  </div>
+              <Dialog open={showReceiveStock && !editingProduct} onOpenChange={(open) => { if (!open) { setShowReceiveStock(false); setStockSession({}); } }}>
+                <DialogContent className="sm:max-w-3xl">
+                  <DialogHeader>
+                    <DialogTitle>Receive Stock Session</DialogTitle>
+                    <DialogDescription>Enter received/damaged quantities, new price, currency, batch no and expiry date for each product.</DialogDescription>
+                  </DialogHeader>
 
-                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
                     {menu.filter((item) => item.stock !== -1).map((item) => {
-                      const row = stockSession[item.id] ?? { received: 0, damaged: 0 };
+                      const row = stockSession[item.id] ?? { received: 0, damaged: 0, newPrice: item.price, currencyCode: item.currencyCode ?? config.defaultCurrencyCode, batchNo: "", expiryDate: "" };
                       const net = row.received - row.damaged;
                       return (
-                        <div key={item.id} className="grid grid-cols-[1fr_90px_90px_70px] gap-2 items-center rounded-lg border border-border bg-card/30 px-3 py-2">
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium truncate">{item.name}</p>
-                            <p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Current: {item.stock}</p>
+                        <div key={item.id} className="rounded-lg border border-border bg-card/30 px-3 py-2">
+                          <div className="flex items-center justify-between gap-2 mb-2">
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium truncate">{item.name}</p>
+                              <p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Current: {item.stock} · Price: {fmt(item.price, config.currencies.find((c) => c.code === (item.currencyCode ?? config.defaultCurrencyCode)) ?? defaultCurrency(config))}</p>
+                            </div>
+                            <span className={`text-xs text-right shrink-0 ${net > 0 ? "text-green-400" : net < 0 ? "text-red-400" : "text-muted-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>
+                              Net: {net > 0 ? `+${net}` : net}
+                            </span>
                           </div>
-                          <input
-                            type="number"
-                            min="0"
-                            value={row.received || ""}
-                            onChange={(e) => {
-                              const received = Math.max(0, parseInt(e.target.value || "0", 10) || 0);
-                              setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), received } }));
-                            }}
-                            placeholder="Received"
-                            className="rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
-                          />
-                          <input
-                            type="number"
-                            min="0"
-                            value={row.damaged || ""}
-                            onChange={(e) => {
-                              const damaged = Math.max(0, parseInt(e.target.value || "0", 10) || 0);
-                              setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), damaged } }));
-                            }}
-                            placeholder="Damaged"
-                            className="rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
-                          />
-                          <span className={`text-xs text-right ${net > 0 ? "text-green-400" : net < 0 ? "text-red-400" : "text-muted-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>
-                            {net > 0 ? `+${net}` : net}
-                          </span>
+                          <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+                            <div>
+                              <label className="text-[10px] text-muted-foreground mb-0.5 block">Received</label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={row.received || ""}
+                                onChange={(e) => {
+                                  const received = Math.max(0, parseInt(e.target.value || "0", 10) || 0);
+                                  setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), received } }));
+                                }}
+                                placeholder="0"
+                                className="w-full rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-muted-foreground mb-0.5 block">Damaged</label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={row.damaged || ""}
+                                onChange={(e) => {
+                                  const damaged = Math.max(0, parseInt(e.target.value || "0", 10) || 0);
+                                  setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), damaged } }));
+                                }}
+                                placeholder="0"
+                                className="w-full rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-muted-foreground mb-0.5 block">New Price</label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={row.newPrice ?? ""}
+                                onChange={(e) => {
+                                  const newPrice = Math.max(0, parseFloat(e.target.value || "0") || 0);
+                                  setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), newPrice } }));
+                                }}
+                                placeholder="0.00"
+                                className="w-full rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-muted-foreground mb-0.5 block">Currency</label>
+                              <select
+                                value={row.currencyCode ?? config.defaultCurrencyCode}
+                                onChange={(e) => {
+                                  setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), currencyCode: e.target.value } }));
+                                }}
+                                className="w-full rounded-lg bg-[#1a1510] border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                              >
+                                {config.currencies.filter((c) => c.enabled).map((c) => <option key={c.code} value={c.code}>{c.code} ({c.symbol})</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-muted-foreground mb-0.5 block">Batch No</label>
+                              <input
+                                type="text"
+                                value={row.batchNo ?? ""}
+                                onChange={(e) => {
+                                  setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), batchNo: e.target.value } }));
+                                }}
+                                placeholder="BATCH-001"
+                                className="w-full rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-muted-foreground mb-0.5 block">Expiry Date</label>
+                              <input
+                                type="date"
+                                value={row.expiryDate ?? ""}
+                                onChange={(e) => {
+                                  setStockSession((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { received: 0, damaged: 0 }), expiryDate: e.target.value } }));
+                                }}
+                                className="w-full rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                              />
+                            </div>
+                          </div>
                         </div>
                       );
                     })}
                   </div>
 
-                  <div className="mt-4 rounded-lg border border-border bg-card/30 px-3 py-2">
+                  <div className="rounded-lg border border-border bg-card/30 px-3 py-2">
                     <div className="flex items-center justify-between text-xs" style={{ fontFamily: "'DM Mono', monospace" }}>
                       <span className="text-green-400">Received: +{stockSessionTotals.received}</span>
                       <span className="text-red-400">Damaged: -{stockSessionTotals.damaged}</span>
@@ -2728,7 +2798,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-end gap-2 mt-4">
+                  <DialogFooter>
                     <button
                       onClick={exportStockSessionCsv}
                       disabled={!hasStockSessionChanges}
@@ -2744,9 +2814,9 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                     >
                       Apply Session
                     </button>
-                  </div>
-                </div>
-              )}
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
 
               {!showReceiveStock && !editingProduct && (
                 <div className="rounded-xl border border-border bg-card/30 p-4 mb-5">
@@ -2841,8 +2911,9 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   <div className="grid grid-cols-2 gap-3">
                     <div><label className="text-xs text-muted-foreground mb-1 block">Name *</label><input value={productForm.name} onChange={(e) => setProductForm({...productForm, name: e.target.value})} placeholder="Product name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Category</label><select value={productForm.category} onChange={(e) => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{enabledCats.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
-                    <div><label className="text-xs text-muted-foreground mb-1 block">Price ({defaultCurrency(config).code}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                    <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({defaultCurrency(config).code})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Currency</label><select value={productForm.currencyCode ?? config.defaultCurrencyCode} onChange={(e) => setProductForm({...productForm, currencyCode: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{config.currencies.filter((c) => c.enabled).map((c) => <option key={c.code} value={c.code}>{c.code} — {c.symbol} (1 ZAR = {c.rate})</option>)}</select></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Price ({config.currencies.find((c) => c.code === (productForm.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? defaultCurrency(config).symbol}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({config.currencies.find((c) => c.code === (productForm.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? defaultCurrency(config).symbol})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Stock (-1 = ∞)</label><input type="number" min="-1" value={productForm.stock} onChange={(e) => setProductForm({...productForm, stock: parseInt(e.target.value)??-1})} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div className="col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop" className="text-sm text-muted-foreground">Popular</label></div>
@@ -2863,8 +2934,9 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   <div className="grid grid-cols-2 gap-3 py-2">
                     <div><label className="text-xs text-muted-foreground mb-1 block">Name *</label><input autoFocus value={productForm.name} onChange={(e) => setProductForm({...productForm, name: e.target.value})} placeholder="Product name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Category</label><select value={productForm.category} onChange={(e) => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{enabledCats.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
-                    <div><label className="text-xs text-muted-foreground mb-1 block">Price ({defaultCurrency(config).code}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                    <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({defaultCurrency(config).code})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Currency</label><select value={productForm.currencyCode ?? config.defaultCurrencyCode} onChange={(e) => setProductForm({...productForm, currencyCode: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{config.currencies.filter((c) => c.enabled).map((c) => <option key={c.code} value={c.code}>{c.code} — {c.symbol} (1 ZAR = {c.rate})</option>)}</select></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Price ({config.currencies.find((c) => c.code === (productForm.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? defaultCurrency(config).symbol}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({config.currencies.find((c) => c.code === (productForm.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? defaultCurrency(config).symbol})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Stock (-1 = ∞)</label><input type="number" min="-1" value={productForm.stock} onChange={(e) => setProductForm({...productForm, stock: parseInt(e.target.value)??-1})} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div className="col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop-modal" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop-modal" className="text-sm text-muted-foreground">Popular</label></div>
@@ -2882,6 +2954,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                     <div key={item.id} className="flex items-center gap-3 rounded-lg border border-border bg-card/30 px-4 py-2.5 mb-1 hover:bg-card/50">
                       <div className="flex-1 min-w-0"><p className="text-sm font-medium truncate">{item.name}{item.stock===0&&<span className="ml-2 text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded">OUT</span>}{item.popular&&<span className="ml-2 text-[10px] text-primary font-bold">● HOT</span>}</p><p className="text-xs text-muted-foreground truncate">{item.description}</p></div>
                       <span className="text-sm font-semibold shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.price, defaultCurrency(config))}</span>
+                      <span className="text-[10px] text-muted-foreground shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{item.currencyCode ?? config.defaultCurrencyCode}</span>
                       <span className="text-[11px] text-muted-foreground shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>C:{fmt(item.cost ?? 0, defaultCurrency(config))}</span>
                       <span className={`text-xs shrink-0 ${item.stock===0?"text-red-400":item.stock===-1?"text-muted-foreground":"text-green-400"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{item.stock===-1?"∞":`${item.stock}`}</span>
                       <button onClick={() => { setEditingProduct(item); setProductForm({...item}); }} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>
