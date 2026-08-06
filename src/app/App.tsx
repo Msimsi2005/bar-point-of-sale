@@ -6,6 +6,9 @@ import {
 } from "../lib/api";
 import { API_BASE, SUPABASE_ANON_KEY } from "../lib/supabase";
 import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+} from "./components/ui/dialog";
+import {
   X, Plus, Minus, CreditCard, Banknote, Users, Clock, ChevronRight,
   Receipt, Trash2, AlertCircle, Settings, ShoppingBag, Monitor,
   Package, Globe, Edit2, Check, Printer, ArrowLeft, Save,
@@ -846,7 +849,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
       if (editPw.trim().length >= 6) patch.password = editPw.trim();
       await apiAdminUpdateTenant(token, email, patch);
       setEditingEmail(null); setEditPw(""); loadTenants();
-    } catch (e: unknown) { alert(e instanceof Error ? e instanceof Error ? e.message : "Failed to update" : "Failed to update"); }
+    } catch (e: unknown) { alert(e instanceof Error ? e.message : "Failed to update"); }
     finally { setEditLoading(false); }
   }
 
@@ -2260,6 +2263,7 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
 function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdate, onBack }: { tenant: Tenant; currentStaffId: string; onTenantChange: (t: Tenant) => void; onCredentialsUpdate: (patch: { loginEmail?: string; password?: string; staffId: string; pin?: string; }) => Promise<void>; onBack: () => void; }) {
   const [section, setSection] = useState<AdminSection>("products");
   const [editingProduct, setEditingProduct] = useState<MenuItem | null>(null);
+  const [showAddProductModal, setShowAddProductModal] = useState(false);
   const [showReceiveStock, setShowReceiveStock] = useState(false);
   const [expandedStockMovementId, setExpandedStockMovementId] = useState<string | null>(null);
   const [stockHistoryRange, setStockHistoryRange] = useState<"today" | "7d" | "all">("all");
@@ -2311,7 +2315,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   function saveProduct() {
     if (!productForm.name.trim() || productForm.price <= 0) return;
     const newMenu = editingProduct ? menu.map((m) => m.id === editingProduct.id ? productForm : m) : [...menu, { ...productForm, id: uid() }];
-    update({ menu: newMenu }); setEditingProduct(null); setProductForm(emptyProduct());
+    update({ menu: newMenu }); setEditingProduct(null); setProductForm(emptyProduct()); setShowAddProductModal(false);
   }
 
   function startBalanceEdit(customerId: string) {
@@ -2659,7 +2663,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                     <button onClick={openReceiveStockSession} className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/10 text-primary px-4 py-2 text-sm font-semibold hover:bg-primary/15">
                       <Package size={14} /> Receive Stock
                     </button>
-                    <button onClick={() => { setProductForm(emptyProduct()); setEditingProduct(null); }} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90"><Plus size={14} /> Add</button>
+                    <button onClick={() => { setProductForm(emptyProduct()); setEditingProduct(null); setShowAddProductModal(true); }} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90"><Plus size={14} /> Add Product</button>
                   </div>
                 )}
               </div>
@@ -2831,22 +2835,46 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                 </div>
               )}
 
-              <div className="rounded-xl border border-border bg-card/40 p-5 mb-5">
-                <p className="text-xs font-semibold text-muted-foreground mb-4 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>{editingProduct ? `Editing: ${editingProduct.name}` : "New Product"}</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="text-xs text-muted-foreground mb-1 block">Name *</label><input value={productForm.name} onChange={(e) => setProductForm({...productForm, name: e.target.value})} placeholder="Product name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                  <div><label className="text-xs text-muted-foreground mb-1 block">Category</label><select value={productForm.category} onChange={(e) => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{enabledCats.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
-                  <div><label className="text-xs text-muted-foreground mb-1 block">Price ({defaultCurrency(config).code}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                  <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({defaultCurrency(config).code})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                  <div><label className="text-xs text-muted-foreground mb-1 block">Stock (-1 = ∞)</label><input type="number" min="-1" value={productForm.stock} onChange={(e) => setProductForm({...productForm, stock: parseInt(e.target.value)??-1})} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                  <div className="col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                  <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop" className="text-sm text-muted-foreground">Popular</label></div>
+              {editingProduct && (
+                <div className="rounded-xl border border-border bg-card/40 p-5 mb-5">
+                  <p className="text-xs font-semibold text-muted-foreground mb-4 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Editing: {editingProduct.name}</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Name *</label><input value={productForm.name} onChange={(e) => setProductForm({...productForm, name: e.target.value})} placeholder="Product name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Category</label><select value={productForm.category} onChange={(e) => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{enabledCats.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Price ({defaultCurrency(config).code}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({defaultCurrency(config).code})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Stock (-1 = ∞)</label><input type="number" min="-1" value={productForm.stock} onChange={(e) => setProductForm({...productForm, stock: parseInt(e.target.value)??-1})} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div className="col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop" className="text-sm text-muted-foreground">Popular</label></div>
+                  </div>
+                  <div className="flex gap-2 mt-4">
+                    <button onClick={saveProduct} disabled={!productForm.name.trim()||productForm.price<=0} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-5 py-2.5 text-sm font-semibold hover:opacity-90 disabled:opacity-30"><Save size={13} />Save</button>
+                    <button onClick={() => { setEditingProduct(null); setProductForm(emptyProduct()); }} className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
+                  </div>
                 </div>
-                <div className="flex gap-2 mt-4">
-                  <button onClick={saveProduct} disabled={!productForm.name.trim()||productForm.price<=0} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-5 py-2.5 text-sm font-semibold hover:opacity-90 disabled:opacity-30"><Save size={13} />{editingProduct ? "Save" : "Add"}</button>
-                  {editingProduct && <button onClick={() => { setEditingProduct(null); setProductForm(emptyProduct()); }} className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground">Cancel</button>}
-                </div>
-              </div>
+              )}
+
+              <Dialog open={showAddProductModal} onOpenChange={setShowAddProductModal}>
+                <DialogContent className="sm:max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Add New Product</DialogTitle>
+                    <DialogDescription>Fill in the details below to add a new product to your menu.</DialogDescription>
+                  </DialogHeader>
+                  <div className="grid grid-cols-2 gap-3 py-2">
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Name *</label><input autoFocus value={productForm.name} onChange={(e) => setProductForm({...productForm, name: e.target.value})} placeholder="Product name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Category</label><select value={productForm.category} onChange={(e) => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{enabledCats.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Price ({defaultCurrency(config).code}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({defaultCurrency(config).code})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div><label className="text-xs text-muted-foreground mb-1 block">Stock (-1 = ∞)</label><input type="number" min="-1" value={productForm.stock} onChange={(e) => setProductForm({...productForm, stock: parseInt(e.target.value)??-1})} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div className="col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop-modal" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop-modal" className="text-sm text-muted-foreground">Popular</label></div>
+                  </div>
+                  <DialogFooter>
+                    <button onClick={() => { setShowAddProductModal(false); setProductForm(emptyProduct()); }} className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
+                    <button onClick={saveProduct} disabled={!productForm.name.trim()||productForm.price<=0} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-5 py-2.5 text-sm font-semibold hover:opacity-90 disabled:opacity-30"><Plus size={13} />Add Product</button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
               {enabledCats.map((cat) => { const items = menu.filter((m) => m.category===cat); if (!items.length) return null; return (
                 <div key={cat}>
                   <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1.5 mt-4" style={{ fontFamily: "'DM Mono', monospace" }}>{cat}</p>

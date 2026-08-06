@@ -3,12 +3,18 @@ vi.mock("./supabase", () => ({
   SUPABASE_ANON_KEY: "anon-test-key",
 }));
 
-import { apiGetSales, apiLogin, apiSaveTenant } from "./api";
+import {
+  apiGetSales, apiLogin, apiSaveTenant,
+  apiAdminLogin, apiAdminListTenants, apiAdminCreateTenant,
+  apiAdminUpdateTenant, apiAdminDeleteTenant,
+  apiGetTenant, apiAddSale, apiUpdateTenantCredentials,
+  apiExecuteSql,
+} from "./api";
 import { makeTenantSavePatch } from "../app/App";
 
 const fetchMock = vi.fn();
 
-describe("api helpers", () => {
+describe("api helpers – venue auth & tenant", () => {
   beforeEach(() => {
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
@@ -79,6 +85,179 @@ describe("api helpers", () => {
       }),
     );
     expect(sales).toEqual([{ id: "sale-1" }]);
+  });
+
+  it("fetches a tenant by email with token auth", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "tenant-1", businessInfo: { name: "Misty" } }),
+    });
+
+    const data = await apiGetTenant("venue@example.com", "token-xyz");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/tenant/venue%40example.com",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(data.businessInfo.name).toBe("Misty");
+  });
+
+  it("posts a new sale record", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+
+    const sale = { id: "sale-1", total: 115, paymentMethod: "Cash" };
+    await apiAddSale("venue@example.com", sale, "token-abc");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/tenant/venue%40example.com/sale",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(sale),
+      }),
+    );
+  });
+
+  it("updates tenant credentials", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+
+    await apiUpdateTenantCredentials("venue@example.com", { staffId: "staff-1", pin: "4321" }, "token-abc");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/tenant/venue%40example.com/credentials",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ staffId: "staff-1", pin: "4321" }),
+      }),
+    );
+  });
+});
+
+describe("api helpers – superadmin", () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  it("logs in as superadmin", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ token: "admin-token" }),
+    });
+
+    const res = await apiAdminLogin("admin@test.com", "admin-pass");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/admin/login",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ email: "admin@test.com", password: "admin-pass" }),
+      }),
+    );
+    expect(res.token).toBe("admin-token");
+  });
+
+  it("lists tenants with superadmin header", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ([{ email: "venue@test.com" }]),
+    });
+
+    await apiAdminListTenants("super-token");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/admin/tenants",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "X-Superadmin-Token": "super-token" }),
+      }),
+    );
+  });
+
+  it("creates a tenant with superadmin header", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+
+    await apiAdminCreateTenant("super-token", {
+      email: "new@venue.com",
+      password: "pass",
+      businessName: "New Venue",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/admin/tenants",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "X-Superadmin-Token": "super-token" }),
+        body: JSON.stringify({ email: "new@venue.com", password: "pass", businessName: "New Venue" }),
+      }),
+    );
+  });
+
+  it("updates a tenant with superadmin header", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+
+    await apiAdminUpdateTenant("super-token", "venue@test.com", { paused: true });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/admin/tenants/venue%40test.com",
+      expect.objectContaining({
+        method: "PATCH",
+        headers: expect.objectContaining({ "X-Superadmin-Token": "super-token" }),
+        body: JSON.stringify({ paused: true }),
+      }),
+    );
+  });
+
+  it("deletes a tenant with superadmin header", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+
+    await apiAdminDeleteTenant("super-token", "venue@test.com");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/admin/tenants/venue%40test.com",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({ "X-Superadmin-Token": "super-token" }),
+      }),
+    );
+  });
+
+  it("executes arbitrary SQL with superadmin header", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ rows: [] }),
+    });
+
+    const res = await apiExecuteSql("super-token", "SELECT * FROM tenants");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/functions/v1/server/sql",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "X-Superadmin-Token": "super-token" }),
+        body: JSON.stringify({ sql: "SELECT * FROM tenants" }),
+      }),
+    );
+    expect(res.rows).toEqual([]);
+  });
+
+  it("throws on non-ok responses", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      json: async () => ({ error: "Not authorized" }),
+    });
+
+    await expect(apiLogin("x", "y")).rejects.toThrow("Not authorized");
   });
 });
 

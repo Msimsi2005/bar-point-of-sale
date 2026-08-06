@@ -649,7 +649,7 @@ describe("SalesSection", () => {
     const mondayOffset = (now.getDay() + 6) % 7;
     const thisWeekStart = new Date(now.getTime() - (mondayOffset * dayMs));
     const thisWeekMid = new Date(thisWeekStart.getTime() + (2 * dayMs));
-    const previousWeekMid = new Date(thisWeekStart.getTime() - (3 * dayMs));
+    const previousWeekMid = new Date(thisWeekStart.getTime() - dayMs);
     const outsideLast7 = new Date(now.getTime() - (20 * dayMs));
 
     const sales = [
