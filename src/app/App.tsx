@@ -64,7 +64,7 @@ interface StaffPermissions {
 }
 
 interface StaffMember { id: string; name: string; pin: string; role: "owner" | "manager" | "bartender"; permissions: StaffPermissions; }
-interface Customer { id: string; name: string; email: string; phone: string; totalSpent: number; visits: number; notes: string; creditBalance?: number; }
+interface Customer { id: string; name: string; email: string; phone: string; totalSpent: number; visits: number; notes: string; creditBalance?: number; creditAllowed?: boolean; }
 interface CategoryConfig { name: string; enabled: boolean; }
 interface Currency { code: string; symbol: string; name: string; rate: number; enabled: boolean; }
 interface PaymentMethod { id: string; name: string; icon: string; enabled: boolean; custom?: boolean; }
@@ -109,6 +109,7 @@ interface TenantConfig {
   categories: CategoryConfig[];
   receiptTemplate: ReceiptTemplate;
   allowZeroSales: boolean;
+  allowCredits: boolean;
   vatEnabled: boolean;
   vatRate: number;
   printers: HardwareDevice[];
@@ -484,6 +485,7 @@ function rowToTenant(row: any): Tenant {
       showPaymentMethod: asBool(mergedConfig.receiptTemplate?.showPaymentMethod, true),
     },
     allowZeroSales: asBool(mergedConfig.allowZeroSales, false),
+    allowCredits: asBool(mergedConfig.allowCredits, true),
     currencies: [...normalizedCurrencies, ...missingCurrencies],
     paymentMethods: mergedConfig.paymentMethods.map((m) => ({
       ...m,
@@ -572,6 +574,7 @@ function rowToTenant(row: any): Tenant {
       visits: c.visits ?? 0,
       notes: c.notes ?? "",
       creditBalance: c.credit_balance ?? c.creditBalance ?? 0,
+      creditAllowed: c.credit_allowed ?? c.creditAllowed ?? true,
     })),
     staff: (row.staff ?? []).map((s: any) => {
       const role = (s.role === "owner" || s.role === "manager" || s.role === "bartender") ? s.role : "bartender";
@@ -594,7 +597,7 @@ function rowToTenant(row: any): Tenant {
 
 function makeConfig(overrides: Partial<TenantConfig> = {}): TenantConfig {
   return {
-    defaultCurrencyCode: "ZAR", allowZeroSales: false, vatEnabled: true, vatRate: 15,
+    defaultCurrencyCode: "ZAR", allowZeroSales: false, allowCredits: true, vatEnabled: true, vatRate: 15,
     currencies: [
       { code: "ZAR", symbol: "R", name: "South African Rand", rate: 1, enabled: true },
       { code: "USD", symbol: "$", name: "US Dollar", rate: 0.054, enabled: true },
@@ -1490,6 +1493,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
               </div>
             )}
           </div>
+          {config.allowCredits && (
           <div className="px-6 mb-4">
               <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Account Handling</p>
               <div className="grid grid-cols-2 gap-1.5">
@@ -1528,7 +1532,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
                     className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50"
                   >
                     <option value="">Select creditor</option>
-                    {tenant.customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    {tenant.customers.filter((c) => c.creditAllowed !== false).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </div>
               )}
@@ -1550,6 +1554,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
                 </div>
               )}
             </div>
+          )}
           <div className="px-6 mb-4">
             <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Payment Method</p>
             {enabledMethods.length === 0 && !isOnAccount ? (
@@ -1604,19 +1609,12 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
   const [name, setName] = useState(""); const [payFirst, setPayFirst] = useState(false);
   const [tabType, setTabType] = useState<"table" | "guest" | "walk-in">("table");
   const [prepaidInput, setPrepaidInput] = useState(""); const [customerId, setCustomerId] = useState("");
-  const [creditorSearch, setCreditorSearch] = useState("");
-  const [appliedCreditorSearch, setAppliedCreditorSearch] = useState("");
   const defaultCurrencySymbol = defaultCurrency(tenant.config).symbol;
   const nameInputId = "new-tab-name";
   const customerSelectId = "new-tab-customer";
-  const customerSearchId = "new-tab-customer-search";
   const prepaidInputId = "new-tab-prepaid";
   const requiresName = tabType !== "walk-in";
-  const creditorResults = tenant.customers.filter((c) => {
-    if (!appliedCreditorSearch) return true;
-    const q = appliedCreditorSearch.toLowerCase();
-    return (`${c.name} ${c.email} ${c.phone}`).toLowerCase().includes(q);
-  });
+  const creditCustomers = tenant.customers.filter((c) => c.creditAllowed !== false);
   const selectedCreditor = tenant.customers.find((c) => c.id === customerId);
 
   const inputLabel = tabType === "table"
@@ -1663,33 +1661,16 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
             </div>
           </div>
           <div><label htmlFor={nameInputId} className="text-xs text-muted-foreground mb-1 block">{inputLabel}</label><input id={nameInputId} autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder={inputPlaceholder} className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-          {tenant.customers.length > 0 && (
+          {tenant.config.allowCredits && tenant.customers.length > 0 && (
             <div className="rounded-xl border border-border bg-white/3 p-3">
               <p className="text-sm font-semibold mb-2">Creditors</p>
-              <div className="flex gap-2 mb-2">
-                <input
-                  id={customerSearchId}
-                  value={creditorSearch}
-                  onChange={(e) => setCreditorSearch(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") setAppliedCreditorSearch(creditorSearch.trim()); }}
-                  placeholder="Search customer by name, email, or phone"
-                  className="flex-1 rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
-                />
-                <button
-                  type="button"
-                  onClick={() => setAppliedCreditorSearch(creditorSearch.trim())}
-                  className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  Search
-                </button>
-              </div>
               <p className="text-[10px] text-muted-foreground mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>
-                Only linked creditors can purchase on account (negative purchasing).
+                Only customers with credit allowed can be linked.
               </p>
               <label htmlFor={customerSelectId} className="text-xs text-muted-foreground mb-1 block">Link Creditor (optional)</label>
               <select id={customerSelectId} value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">
                 <option value="">— No Creditor Linked —</option>
-                {creditorResults.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {creditCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
               {selectedCreditor && (
                 <div className="mt-2 text-xs text-muted-foreground">
@@ -1968,100 +1949,9 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
       <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
         <div><h2 className="text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Sales</h2><p className="text-xs text-muted-foreground">{filtered.length} transactions · {periodLabel}</p></div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Calendar size={13} className="text-muted-foreground" />
           <div className="flex items-center gap-1 rounded-lg border border-border bg-[#1a1510] px-1 py-1">
-            {[
-              { id: "last-7", label: "Last 7 Days" },
-              { id: "this-week", label: "This Week" },
-              { id: "previous-week", label: "Previous Week" },
-            ].map((preset) => (
-              <button
-                key={preset.id}
-                type="button"
-                aria-label={`Preset ${preset.label}`}
-                onClick={() => setQuickFilter(preset.id as "last-7" | "this-week" | "previous-week")}
-                className={`rounded-md px-2 py-1 text-[10px] font-semibold transition-all ${quickFilter === preset.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/10"}`}
-                style={{ fontFamily: "'DM Mono', monospace" }}
-              >
-                {preset.label}
-              </button>
-            ))}
-            {quickFilter !== "none" && (
-              <button
-                type="button"
-                aria-label="Clear preset filter"
-                onClick={() => setQuickFilter("none")}
-                className="rounded-md px-2 py-1 text-[10px] font-semibold text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all"
-                style={{ fontFamily: "'DM Mono', monospace" }}
-              >
-                Clear
-              </button>
-            )}
-          </div>
-          <div className="relative">
-            <select
-              aria-label="Report granularity"
-              value={filterMode}
-              onChange={(e) => setFilterMode(e.target.value as "daily" | "monthly")}
-              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
-            >
-              <option value="daily">Daily</option>
-              <option value="monthly">Monthly</option>
-            </select>
-            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-          </div>
-          <div className="relative">
-            <select
-              aria-label="Sales scope filter"
-              value={salesScope}
-              onChange={(e) => setSalesScope(e.target.value as "all" | "negative-only")}
-              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
-            >
-              <option value="all">All Sales</option>
-              <option value="negative-only">Negative Sales Only</option>
-            </select>
-            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-          </div>
-          {negativeSalesCount > 0 && (
-            <button
-              type="button"
-              aria-label="Switch to Negative Sales Only"
-              onClick={() => setSalesScope("negative-only")}
-              className="rounded-full border border-red-500/40 bg-red-950/30 px-2 py-1 text-[10px] font-semibold text-red-300 hover:bg-red-950/40 transition-colors"
-              style={{ fontFamily: "'DM Mono', monospace" }}
-            >
-              Negative: {negativeSalesCount}
-            </button>
-          )}
-          <div className="relative">
-            <select
-              aria-label="Cashier filter"
-              value={selectedCashier}
-              onChange={(e) => setSelectedCashier(e.target.value)}
-              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
-            >
-              <option value="all">All Cashiers</option>
-              {cashierOptions.map((cashier) => <option key={cashier.id} value={cashier.id}>{cashier.name}</option>)}
-            </select>
-            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-          </div>
-          <div className="relative">
-            <select
-              aria-label="Quick profit filter"
-              value={quickFilter}
-              onChange={(e) => setQuickFilter(e.target.value as "none" | "this-month" | "this-year" | "last-7" | "last-30" | "last-90" | "this-week" | "previous-week")}
-              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
-            >
-              <option value="none">No quick filter</option>
-              <option value="this-month">This month</option>
-              <option value="this-year">This year</option>
-              <option value="last-7">Past 7 days</option>
-              <option value="this-week">This week</option>
-              <option value="previous-week">Previous week</option>
-              <option value="last-30">Past 30 days</option>
-              <option value="last-90">Past 90 days</option>
-            </select>
-            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+            <button onClick={() => setFilterMode("daily")} className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${filterMode === "daily" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/10"}`}>Daily</button>
+            <button onClick={() => setFilterMode("monthly")} className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${filterMode === "monthly" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-white/10"}`}>Monthly</button>
           </div>
           <div className="relative">
             <select
@@ -2076,7 +1966,7 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
             >
               {filterMode === "daily"
                 ? <>
-                    <option value="all">All Time</option>
+                    <option value="all">All Days</option>
                     {allDates.map((d) => <option key={d} value={d}>{labelDate(d)}</option>)}
                   </>
                 : <>
@@ -2086,41 +1976,22 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
             </select>
             <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
           </div>
-          <input
-            type="date"
-            aria-label="Range from"
-            value={rangeFrom}
-            onChange={(e) => setRangeFrom(e.target.value)}
-            className="rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
-          />
-          <input
-            type="date"
-            aria-label="Range to"
-            value={rangeTo}
-            onChange={(e) => setRangeTo(e.target.value)}
-            className="rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
-          />
-          {(rangeFrom || rangeTo) && (
-            <button
-              onClick={() => { setRangeFrom(""); setRangeTo(""); }}
-              className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5"
+          <div className="relative">
+            <select
+              aria-label="Cashier filter"
+              value={selectedCashier}
+              onChange={(e) => setSelectedCashier(e.target.value)}
+              className="appearance-none rounded-lg bg-[#1a1510] border border-border pl-3 pr-8 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 cursor-pointer"
             >
-              Clear Range
-            </button>
-          )}
+              <option value="all">All Users</option>
+              {cashierOptions.map((cashier) => <option key={cashier.id} value={cashier.id}>{cashier.name}</option>)}
+            </select>
+            <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+          </div>
           <button onClick={printReport} className="rounded-lg border border-border px-3 py-2 text-xs text-foreground hover:bg-white/5 flex items-center gap-1.5">
             <Printer size={12} />
-            Print Report
+            Print
           </button>
-        </div>
-        <div className="w-full sm:w-60">
-          <input
-            aria-label="Search table name"
-            value={tableSearch}
-            onChange={(e) => setTableSearch(e.target.value)}
-            placeholder="Search table name"
-            className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-xs text-foreground focus:outline-none focus:border-primary/50"
-          />
         </div>
       </div>
       {effectiveRangeActive && (
@@ -2277,10 +2148,16 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   const [expandedStockMovementId, setExpandedStockMovementId] = useState<string | null>(null);
   const [stockHistoryRange, setStockHistoryRange] = useState<"today" | "7d" | "all">("all");
   const [stockHistoryQuery, setStockHistoryQuery] = useState("");
+  const [stockSearch, setStockSearch] = useState("");
   const [stockSession, setStockSession] = useState<Record<string, { received: number; damaged: number; newPrice?: number; currencyCode?: string; batchNo?: string; expiryDate?: string }>>({});
   const [bizSaved, setBizSaved] = useState(false);
+  const [productSaving, setProductSaving] = useState(false);
+  const [productSaved, setProductSaved] = useState(false);
+  const [stockSaving, setStockSaving] = useState(false);
+  const [stockSaved, setStockSaved] = useState(false);
   const [newCatName, setNewCatName] = useState(""); const [newPayName, setNewPayName] = useState(""); const [newPayIcon, setNewPayIcon] = useState("card");
   const [newStaffName, setNewStaffName] = useState(""); const [newStaffPin, setNewStaffPin] = useState(""); const [newStaffRole, setNewStaffRole] = useState<StaffMember["role"]>("bartender");
+  const [pinEditId, setPinEditId] = useState<string | null>(null); const [pinEditValue, setPinEditValue] = useState("");
   const [newCustName, setNewCustName] = useState(""); const [newCustEmail, setNewCustEmail] = useState(""); const [newCustPhone, setNewCustPhone] = useState(""); const [editingCust, setEditingCust] = useState<Customer | null>(null);
   const [editingBalanceCustomerId, setEditingBalanceCustomerId] = useState<string | null>(null);
   const [editingBalanceInput, setEditingBalanceInput] = useState("");
@@ -2323,8 +2200,15 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
 
   function saveProduct() {
     if (!productForm.name.trim() || productForm.price <= 0) return;
-    const newMenu = editingProduct ? menu.map((m) => m.id === editingProduct.id ? productForm : m) : [...menu, { ...productForm, id: uid() }];
-    update({ menu: newMenu }); setEditingProduct(null); setProductForm(emptyProduct()); setShowAddProductModal(false);
+    if (productSaving) return;
+    setProductSaving(true);
+    setTimeout(() => {
+      const newMenu = editingProduct ? menu.map((m) => m.id === editingProduct.id ? productForm : m) : [...menu, { ...productForm, id: uid() }];
+      update({ menu: newMenu }); setEditingProduct(null); setProductForm(emptyProduct()); setShowAddProductModal(false);
+      setProductSaving(false);
+      setProductSaved(true);
+      setTimeout(() => setProductSaved(false), 2000);
+    }, 350);
   }
 
   function startBalanceEdit(customerId: string) {
@@ -2358,56 +2242,66 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   }
 
   function applyReceiveStockSession() {
-    const changedLines: StockMovementLine[] = [];
-    const nextMenu = menu.map((item) => {
-      if (item.stock === -1) return item;
-      const row = stockSession[item.id];
-      if (!row) return item;
-      const received = Number.isFinite(row.received) ? Math.max(0, row.received) : 0;
-      const damaged = Number.isFinite(row.damaged) ? Math.max(0, row.damaged) : 0;
-      const net = received - damaged;
-      if (net === 0) return item;
-      const nextStock = Math.max(item.stock + net, 0);
-      changedLines.push({
-        itemId: item.id,
-        itemName: item.name,
-        previousStock: item.stock,
-        received,
-        damaged,
-        net,
-        nextStock,
-        newPrice: row.newPrice,
-        currencyCode: row.currencyCode,
-        batchNo: row.batchNo,
-        expiryDate: row.expiryDate,
+    if (stockSaving) return;
+    setStockSaving(true);
+    setTimeout(() => {
+      const changedLines: StockMovementLine[] = [];
+      const nextMenu = menu.map((item) => {
+        if (item.stock === -1) return item;
+        const row = stockSession[item.id];
+        if (!row) return item;
+        const received = Number.isFinite(row.received) ? Math.max(0, row.received) : 0;
+        const damaged = Number.isFinite(row.damaged) ? Math.max(0, row.damaged) : 0;
+        const net = received - damaged;
+        if (net === 0) return item;
+        const nextStock = Math.max(item.stock + net, 0);
+        changedLines.push({
+          itemId: item.id,
+          itemName: item.name,
+          previousStock: item.stock,
+          received,
+          damaged,
+          net,
+          nextStock,
+          newPrice: row.newPrice,
+          currencyCode: row.currencyCode,
+          batchNo: row.batchNo,
+          expiryDate: row.expiryDate,
+        });
+        return { ...item, stock: nextStock, price: row.newPrice ?? item.price, currencyCode: row.currencyCode ?? item.currencyCode };
       });
-      return { ...item, stock: nextStock, price: row.newPrice ?? item.price, currencyCode: row.currencyCode ?? item.currencyCode };
-    });
 
-    if (changedLines.length === 0) return;
+      if (changedLines.length === 0) {
+        setStockSaving(false);
+        return;
+      }
 
-    const movementRecord: StockMovementRecord = {
-      id: uid(),
-      timestamp: new Date().toISOString(),
-      staffId: currentStaffId,
-      staffName: currentStaff?.name ?? "Unknown",
-      lines: changedLines,
-      totals: {
-        received: stockSessionTotals.received,
-        damaged: stockSessionTotals.damaged,
-        net: stockSessionNet,
-      },
-    };
+      const movementRecord: StockMovementRecord = {
+        id: uid(),
+        timestamp: new Date().toISOString(),
+        staffId: currentStaffId,
+        staffName: currentStaff?.name ?? "Unknown",
+        lines: changedLines,
+        totals: {
+          received: stockSessionTotals.received,
+          damaged: stockSessionTotals.damaged,
+          net: stockSessionNet,
+        },
+      };
 
-    update({
-      menu: nextMenu,
-      config: {
-        ...config,
-        stockMovements: [movementRecord, ...(config.stockMovements ?? [])].slice(0, 50),
-      },
-    });
-    setShowReceiveStock(false);
-    setStockSession({});
+      update({
+        menu: nextMenu,
+        config: {
+          ...config,
+          stockMovements: [movementRecord, ...(config.stockMovements ?? [])].slice(0, 50),
+        },
+      });
+      setShowReceiveStock(false);
+      setStockSession({});
+      setStockSaving(false);
+      setStockSaved(true);
+      setTimeout(() => setStockSaved(false), 2000);
+    }, 350);
   }
 
   function exportStockSessionCsv() {
@@ -2688,8 +2582,21 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                     <DialogDescription>Enter received/damaged quantities, new price, currency, batch no and expiry date for each product.</DialogDescription>
                   </DialogHeader>
 
+                  <div className="mb-3">
+                    <input
+                      value={stockSearch}
+                      onChange={(e) => setStockSearch(e.target.value)}
+                      placeholder="Search products by name or category…"
+                      className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                    />
+                  </div>
+
                   <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                    {menu.filter((item) => item.stock !== -1).map((item) => {
+                    {menu.filter((item) => item.stock !== -1).filter((item) => {
+                      const q = stockSearch.trim().toLowerCase();
+                      if (!q) return true;
+                      return item.name.toLowerCase().includes(q) || item.category.toLowerCase().includes(q) || (item.description ?? "").toLowerCase().includes(q);
+                    }).map((item) => {
                       const row = stockSession[item.id] ?? { received: 0, damaged: 0, newPrice: item.price, currencyCode: item.currencyCode ?? config.defaultCurrencyCode, batchNo: "", expiryDate: "" };
                       const net = row.received - row.damaged;
                       return (
@@ -2782,6 +2689,14 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                                 className="w-full rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
                               />
                             </div>
+                            <div className="col-span-2 md:col-span-6 flex items-end justify-end">
+                              <button
+                                onClick={() => { setEditingProduct(item); setProductForm({ ...item }); setShowReceiveStock(false); }}
+                                className="flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/10 text-primary px-3 py-1.5 text-xs font-semibold hover:bg-primary/15 transition-colors"
+                              >
+                                <Edit2 size={12} /> Update
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -2809,10 +2724,10 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                     <button onClick={() => { setShowReceiveStock(false); setStockSession({}); }} className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
                     <button
                       onClick={applyReceiveStockSession}
-                      disabled={!hasStockSessionChanges}
-                      className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                      disabled={!hasStockSessionChanges || stockSaving}
+                      className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${stockSaved ? "bg-green-600 text-white" : "bg-primary text-primary-foreground hover:opacity-90"}`}
                     >
-                      Apply Session
+                      {stockSaving ? <><span className="inline-block w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin align-middle mr-1.5" />Applying…</> : stockSaved ? <><Check size={13} className="inline-block align-middle mr-1" />Complete</> : "Apply Session"}
                     </button>
                   </DialogFooter>
                 </DialogContent>
@@ -2919,7 +2834,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                     <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop" className="text-sm text-muted-foreground">Popular</label></div>
                   </div>
                   <div className="flex gap-2 mt-4">
-                    <button onClick={saveProduct} disabled={!productForm.name.trim()||productForm.price<=0} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-5 py-2.5 text-sm font-semibold hover:opacity-90 disabled:opacity-30"><Save size={13} />Save</button>
+                    <button onClick={saveProduct} disabled={!productForm.name.trim()||productForm.price<=0||productSaving} className={`flex items-center gap-1.5 rounded-lg px-5 py-2.5 text-sm font-semibold transition-all disabled:opacity-30 ${productSaved ? "bg-green-600 text-white" : "bg-primary text-primary-foreground hover:opacity-90"}`}>{productSaving ? <><span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />Saving…</> : productSaved ? <><Check size={13} /> Saved</> : <><Save size={13} />Save</>}</button>
                     <button onClick={() => { setEditingProduct(null); setProductForm(emptyProduct()); }} className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
                   </div>
                 </div>
@@ -2943,7 +2858,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   </div>
                   <DialogFooter>
                     <button onClick={() => { setShowAddProductModal(false); setProductForm(emptyProduct()); }} className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
-                    <button onClick={saveProduct} disabled={!productForm.name.trim()||productForm.price<=0} className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-5 py-2.5 text-sm font-semibold hover:opacity-90 disabled:opacity-30"><Plus size={13} />Add Product</button>
+                    <button onClick={saveProduct} disabled={!productForm.name.trim()||productForm.price<=0||productSaving} className={`flex items-center gap-1.5 rounded-lg px-5 py-2.5 text-sm font-semibold transition-all disabled:opacity-30 ${productSaved ? "bg-green-600 text-white" : "bg-primary text-primary-foreground hover:opacity-90"}`}>{productSaving ? <><span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />Saving…</> : productSaved ? <><Check size={13} />Added</> : <><Plus size={13} />Add Product</>}</button>
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
@@ -3083,8 +2998,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
             <div className="max-w-lg">
               <h2 className="text-xl font-bold mb-1" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Business Users</h2>
               <p className="text-sm text-muted-foreground mb-5">Company admins manage the users who can access this business.</p>
-              <div className="space-y-2 mb-5">{tenant.staff.map((s) => { const staffPermissions = s.permissions ?? defaultPermissionsForRole(s.role); return <div key={s.id} className="rounded-xl border border-border bg-card/30 px-4 py-3"><div className="flex items-center gap-3"><div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{s.name[0]}</span></div><div className="flex-1"><p className="text-sm font-semibold">{s.name}</p><p className="text-xs text-muted-foreground capitalize">{s.role} · PIN: ••••</p></div>{s.role!=="owner"&&<button onClick={()=>update({staff:tenant.staff.filter((st)=>st.id!==s.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>}</div><div className="mt-3 grid grid-cols-2 gap-2">{permissionLabels.map(({ key, label }) => (<button key={key} disabled={s.role === "owner"} onClick={() => { if (s.role === "owner") return; update({ staff: tenant.staff.map((st) => { if (st.id !== s.id) return st; const nextPermissions = st.permissions ?? defaultPermissionsForRole(st.role); return { ...st, permissions: { ...nextPermissions, [key]: !nextPermissions[key] } }; }) }); }} className={`flex items-center justify-between rounded-lg border px-2 py-1.5 text-xs ${staffPermissions[key] ? "border-primary/30 bg-primary/10 text-primary" : "border-border text-muted-foreground"} ${s.role === "owner" ? "opacity-60 cursor-not-allowed" : "hover:bg-white/5"}`}><span>{label}</span><span className={`w-8 h-4 rounded-full relative ${staffPermissions[key] ? "bg-primary" : "bg-white/10"}`}><span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${staffPermissions[key] ? "left-[18px]" : "left-0.5"}`} /></span></button>))}</div></div>; })}</div>
-              <div className="rounded-xl border border-dashed border-border p-4">
+              <div className="rounded-xl border border-dashed border-border p-4 mb-5">
                 <p className="text-xs text-muted-foreground mb-3 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Add User</p>
                 <div className="space-y-2">
                   <input value={newStaffName} onChange={(e)=>setNewStaffName(e.target.value)} placeholder="Full name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
@@ -3092,6 +3006,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   <button onClick={()=>{if(!newStaffName.trim()||newStaffPin.length!==4)return;update({staff:[...tenant.staff,{id:uid(),name:newStaffName.trim(),pin:newStaffPin,role:newStaffRole,permissions:defaultPermissionsForRole(newStaffRole)}]});setNewStaffName("");setNewStaffPin("");setNewStaffRole("bartender");}} disabled={!newStaffName.trim()||newStaffPin.length!==4} className="w-full rounded-lg bg-primary/15 border border-primary/25 text-primary py-2 text-sm font-semibold hover:bg-primary/20 disabled:opacity-30">+ Add Business User</button>
                 </div>
               </div>
+              <div className="space-y-2">{tenant.staff.map((s, si) => { const staffPermissions = s.permissions ?? defaultPermissionsForRole(s.role); const isPinEditing = pinEditId === s.id; return <div key={s.id} className="rounded-xl border border-border bg-card/30 px-4 py-3"><div className="flex items-center gap-3"><div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center shrink-0"><span className="text-primary text-sm font-bold">{s.name[0]}</span></div><div className="flex-1"><p className="text-sm font-semibold">{s.name}</p>{isPinEditing ? <div className="flex items-center gap-1.5 mt-1"><input value={pinEditValue} onChange={(e)=>setPinEditValue(e.target.value.replace(/\D/g,"").slice(0,4))} placeholder="New 4-digit PIN" maxLength={4} className="w-28 rounded border border-border bg-white/5 px-2 py-1 text-[10px] text-foreground focus:outline-none focus:border-primary/50" style={{ fontFamily: "'DM Mono', monospace" }} /><button onClick={()=>{if(/^\d{4}$/.test(pinEditValue)){update({staff:tenant.staff.map((st)=>st.id===s.id?{...st,pin:pinEditValue}:st)});}setPinEditId(null);setPinEditValue("");}} className="rounded border border-primary/40 px-2 py-1 text-[10px] text-primary hover:bg-primary/10">Save</button><button onClick={()=>{setPinEditId(null);setPinEditValue("");}} className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground">Cancel</button></div> : <p className="text-xs text-muted-foreground capitalize">{s.role} · PIN: ••••</p>}</div><button onClick={()=>{setPinEditId(s.id);setPinEditValue(s.pin);}} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>{s.role!=="owner"&&<button onClick={()=>update({staff:tenant.staff.filter((st)=>st.id!==s.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>}</div><div className="mt-3 grid grid-cols-2 gap-2">{permissionLabels.map(({ key, label }) => (<button key={key} disabled={s.role === "owner"} onClick={() => { if (s.role === "owner") return; update({ staff: tenant.staff.map((st) => { if (st.id !== s.id) return st; const nextPermissions = st.permissions ?? defaultPermissionsForRole(st.role); return { ...st, permissions: { ...nextPermissions, [key]: !nextPermissions[key] } }; }) }); }} className={`flex items-center justify-between rounded-lg border px-2 py-1.5 text-xs ${staffPermissions[key] ? "border-primary/30 bg-primary/10 text-primary" : "border-border text-muted-foreground"} ${s.role === "owner" ? "opacity-60 cursor-not-allowed" : "hover:bg-white/5"}`}><span>{label}</span><span className={`w-8 h-4 rounded-full relative ${staffPermissions[key] ? "bg-primary" : "bg-white/10"}`}><span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${staffPermissions[key] ? "left-[18px]" : "left-0.5"}`} /></span></button>))}</div></div>; })}</div>
             </div>
           )}
 
@@ -3106,7 +3021,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   <input value={newCustPhone} onChange={(e)=>setNewCustPhone(e.target.value)} placeholder="Phone" className="rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={()=>{if(!newCustName.trim())return;if(editingCust){update({customers:tenant.customers.map((c)=>c.id===editingCust.id?{...c,name:newCustName.trim(),email:newCustEmail,phone:newCustPhone,creditBalance:c.creditBalance??0}:c)});setEditingCust(null);}else{update({customers:[...tenant.customers,{id:uid(),name:newCustName.trim(),email:newCustEmail,phone:newCustPhone,totalSpent:0,visits:0,notes:"",creditBalance:0}]});}setNewCustName("");setNewCustEmail("");setNewCustPhone("");}} disabled={!newCustName.trim()} className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-30">{editingCust?"Save":"Add"}</button>
+                  <button onClick={()=>{if(!newCustName.trim())return;if(editingCust){update({customers:tenant.customers.map((c)=>c.id===editingCust.id?{...c,name:newCustName.trim(),email:newCustEmail,phone:newCustPhone,creditBalance:c.creditBalance??0,creditAllowed:c.creditAllowed??true}:c)});setEditingCust(null);}else{update({customers:[...tenant.customers,{id:uid(),name:newCustName.trim(),email:newCustEmail,phone:newCustPhone,totalSpent:0,visits:0,notes:"",creditBalance:0,creditAllowed:true}]});}setNewCustName("");setNewCustEmail("");setNewCustPhone("");}} disabled={!newCustName.trim()} className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-30">{editingCust?"Save":"Add"}</button>
                   {editingCust && <button onClick={()=>{setEditingCust(null);setNewCustName("");setNewCustEmail("");setNewCustPhone("");}} className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground">Cancel</button>}
                 </div>
               </div>
@@ -3143,6 +3058,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                           <button onClick={() => startBalanceEdit(c.id)} className="rounded border border-primary/30 px-2 py-1 text-[10px] text-primary hover:bg-primary/10">Update Balance</button>
                         )}
                         <button onClick={()=>update({customers:tenant.customers.map((cu)=>cu.id===c.id?{...cu,creditBalance:0}:cu)})} className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground">Clear</button>
+                        <button onClick={()=>update({customers:tenant.customers.map((cu)=>cu.id===c.id?{...cu,creditAllowed:!(cu.creditAllowed ?? true)}:cu)})} className={`rounded border px-2 py-1 text-[10px] ${(c.creditAllowed ?? true) ? "text-green-400 border-green-400/30 hover:bg-green-400/10" : "text-muted-foreground border-border hover:text-foreground"}`}>{(c.creditAllowed ?? true) ? "Credit ✓" : "No Credit"}</button>
                         <button onClick={()=>{setEditingCust(c);setNewCustName(c.name);setNewCustEmail(c.email);setNewCustPhone(c.phone);}} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>
                         <button onClick={()=>update({customers:tenant.customers.filter((cu)=>cu.id!==c.id)})} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>
                       </div>
@@ -3158,6 +3074,73 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
           {section === "system" && (
             <div className="max-w-xl">
               <h2 className="text-xl font-bold mb-5" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>System</h2>
+              <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
+                <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Receipt Printing</p>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Header line 1</label>
+                      <input
+                        value={config.receiptTemplate.headerLine1}
+                        onChange={(e) => updateConfig({ receiptTemplate: { ...config.receiptTemplate, headerLine1: e.target.value } })}
+                        placeholder="Welcome to {{businessName}}"
+                        className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Header line 2</label>
+                      <input
+                        value={config.receiptTemplate.headerLine2}
+                        onChange={(e) => updateConfig({ receiptTemplate: { ...config.receiptTemplate, headerLine2: e.target.value } })}
+                        placeholder="Tagline or branch"
+                        className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Footer line</label>
+                      <input
+                        value={config.receiptTemplate.footerLine}
+                        onChange={(e) => updateConfig({ receiptTemplate: { ...config.receiptTemplate, footerLine: e.target.value } })}
+                        placeholder="Thank you for visiting {{businessName}}!"
+                        className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {[
+                      { key: "showLogo", label: "Show company logo" },
+                      { key: "showAddress", label: "Show address" },
+                      { key: "showPhone", label: "Show phone" },
+                      { key: "showVatNumber", label: "Show VAT number" },
+                      { key: "showTabName", label: "Show tab name" },
+                      { key: "showPaymentMethod", label: "Show payment method" },
+                    ].map((option) => {
+                      const checked = config.receiptTemplate[option.key as keyof ReceiptTemplate] as boolean;
+                      return (
+                        <label key={option.key} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => updateConfig({ receiptTemplate: { ...config.receiptTemplate, [option.key]: e.target.checked } as Partial<ReceiptTemplate> })}
+                            className="accent-primary"
+                          />
+                          {option.label}
+                        </label>
+                      );
+                    })}
+                  </div>
+
+                  <div className="rounded-lg border border-border bg-white/2 px-4 py-3">
+                    <p className="text-xs text-muted-foreground mb-2">Receipt preview placeholders:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {["{{businessName}}", "{{tabName}}", "{{paymentMethod}}"].map((ph) => (
+                        <code key={ph} className="text-[10px] bg-white/5 border border-border rounded px-2 py-1 text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{ph}</code>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
                 <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Hardware Settings</p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -3276,6 +3259,18 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   </div>
                   <button onClick={saveCredentials} disabled={credentialsSaving || !currentStaff} className="w-full rounded-xl bg-primary text-primary-foreground py-3 text-sm font-bold tracking-widest transition-all hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
                     {credentialsSaving ? "SAVING ACCESS..." : "SAVE ACCESS CREDENTIALS"}
+                  </button>
+                </div>
+              </div>
+              <div className="rounded-xl border border-border bg-card/30 p-5 mb-4">
+                <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Credit Settings</p>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-semibold">Allow Credits</p>
+                    <p className="text-xs text-muted-foreground">When disabled, all credit options (on-account, settlement, deposit, creditors) are hidden from checkout and new tabs.</p>
+                  </div>
+                  <button onClick={() => updateConfig({ allowCredits: !config.allowCredits })} className={`w-12 h-6 rounded-full relative shrink-0 ${config.allowCredits ? "bg-primary" : "bg-white/10"}`}>
+                    <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${config.allowCredits ? "left-[26px]" : "left-0.5"}`} />
                   </button>
                 </div>
               </div>
