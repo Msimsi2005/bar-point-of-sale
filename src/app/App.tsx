@@ -143,7 +143,7 @@ interface SaleRecord {
   subtotal: number; tax: number; total: number; totalConverted: number;
   paymentMethod: string; currencyCode: string; currencySymbol: string;
   timestamp: Date; staffId: string; customerId?: string;
-  prepaid?: number; change?: number;
+  prepaid?: number; change?: number; cashTendered?: number;
   accountAction?: "purchase" | "on-account" | "settlement" | "deposit";
   accountAmount?: number;
 }
@@ -1289,7 +1289,7 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
 // RECEIPT MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ReceiptModal({ sale, businessInfo, receiptTemplate, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; receiptTemplate: ReceiptTemplate; onClose: () => void; }) {
+function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; receiptTemplate: ReceiptTemplate; staffName: string; onClose: () => void; }) {
   const printRef = useRef<HTMLDivElement>(null);
   const [printError, setPrintError] = useState("");
 
@@ -1320,6 +1320,8 @@ function ReceiptModal({ sale, businessInfo, receiptTemplate, onClose }: { sale: 
             .line { border-top: 1px dashed #000; margin: 8px 0; }
             .row { display: flex; justify-content: space-between; gap: 8px; }
             .bold { font-weight: bold; }
+            .item { margin-bottom: 6px; }
+            .desc { font-size: 9px; color: #777; margin: 1px 0 2px; }
             @media print {
               body { width: auto; padding: 0; }
             }
@@ -1363,15 +1365,24 @@ function ReceiptModal({ sale, businessInfo, receiptTemplate, onClose }: { sale: 
             <p className="c s">{fmtDate(sale.timestamp)} · {fmtTime(sale.timestamp)}</p>
             {receiptTemplate.showTabName && <p className="c s">Tab: {sale.tabName}</p>}
             <div className="line" />
-            {sale.items.map((o, i) => <div key={i} className="row"><span>{o.qty}× {o.menuItem.name}</span><span>{sale.currencySymbol}{(o.menuItem.price * o.qty).toFixed(2)}</span></div>)}
+            {sale.items.map((o, i) => (
+              <div key={i} className="item">
+                <div className="row"><span className="bold">{o.menuItem.name}</span><span>{sale.currencySymbol}{o.menuItem.price.toFixed(2)}</span></div>
+                {o.menuItem.description && <p className="desc">{o.menuItem.description}</p>}
+                {o.qty > 1 && <div className="row"><span className="s">{o.qty} × {sale.currencySymbol}{o.menuItem.price.toFixed(2)}</span><span>{sale.currencySymbol}{(o.menuItem.price * o.qty).toFixed(2)}</span></div>}
+              </div>
+            ))}
             <div className="line" />
             <div className="row"><span>Subtotal</span><span>{sale.currencySymbol}{sale.subtotal.toFixed(2)}</span></div>
             {sale.tax > 0 && <div className="row"><span>VAT</span><span>{sale.currencySymbol}{sale.tax.toFixed(2)}</span></div>}
             <div className="line" />
             <div className="row bold"><span>TOTAL</span><span>{sale.currencySymbol}{sale.totalConverted.toFixed(2)}</span></div>
-            {sale.prepaid && <><div className="row"><span>Prepaid</span><span>{sale.currencySymbol}{sale.prepaid.toFixed(2)}</span></div>{sale.change != null && <div className="row bold"><span>Change</span><span>{sale.currencySymbol}{sale.change.toFixed(2)}</span></div>}</>}
+            {sale.prepaid && <><div className="row"><span>Prepaid</span><span>{sale.currencySymbol}{sale.prepaid.toFixed(2)}</span></div></>}
+            {sale.change != null && <div className="row bold"><span>Change</span><span>{sale.currencySymbol}{sale.change.toFixed(2)}</span></div>}
             <div className="line" />
+            {sale.cashTendered != null && <div className="row"><span>Cash Tendered</span><span>{sale.currencySymbol}{sale.cashTendered.toFixed(2)}</span></div>}
             {receiptTemplate.showPaymentMethod && <p className="c s">Paid via {sale.paymentMethod}</p>}
+            {staffName && <p className="c s">Cashier: {staffName}</p>}
             {receiptTemplate.showVatNumber && businessInfo.vatNumber && <p className="c s">VAT No: {businessInfo.vatNumber}</p>}
             <p className="c s">{fillReceiptPlaceholders(receiptTemplate.footerLine || defaultReceiptTemplate().footerLine, sale, businessInfo)}</p>
           </div>
@@ -1456,6 +1467,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
       currencyCode: currency.code, currencySymbol: currency.symbol,
       timestamp: new Date(), staffId, prepaid: tab.prepaid, customerId: selectedCustomerId || undefined,
       change: isCash && cashAmount > saleAmount ? parseFloat((cashAmount - saleAmount).toFixed(2)) : undefined,
+      cashTendered: isCash && cashAmount > 0 ? cashAmount : undefined,
       accountAction,
       accountAmount: saleAmount,
     };
@@ -1708,10 +1720,7 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
   const allDates = Array.from(new Set(sales.map((s) => dateKey(s.timestamp)))).sort((a, b) => b.localeCompare(a));
   const allMonths = Array.from(new Set(sales.map((s) => s.timestamp.toISOString().slice(0, 7)))).sort((a, b) => b.localeCompare(a));
   const staffNameById = new Map(staff.map((s) => [s.id, s.name] as const));
-  const cashierOptions = Array.from(new Set(sales.map((s) => s.staffId))).map((id) => ({
-    id,
-    name: staffNameById.get(id) ?? id,
-  })).sort((a, b) => a.name.localeCompare(b.name));
+  const cashierOptions = staff.map((s) => ({ id: s.id, name: s.name })).sort((a, b) => a.name.localeCompare(b.name));
   const [filterMode, setFilterMode] = useState<"daily" | "monthly">("daily");
   const [selectedDate, setSelectedDate] = useState("all");
   const [selectedMonth, setSelectedMonth] = useState("all");
@@ -2862,22 +2871,49 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
-              {enabledCats.map((cat) => { const items = menu.filter((m) => m.category===cat); if (!items.length) return null; return (
-                <div key={cat}>
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1.5 mt-4" style={{ fontFamily: "'DM Mono', monospace" }}>{cat}</p>
-                  {items.map((item) => (
-                    <div key={item.id} className="flex items-center gap-3 rounded-lg border border-border bg-card/30 px-4 py-2.5 mb-1 hover:bg-card/50">
-                      <div className="flex-1 min-w-0"><p className="text-sm font-medium truncate">{item.name}{item.stock===0&&<span className="ml-2 text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded">OUT</span>}{item.popular&&<span className="ml-2 text-[10px] text-primary font-bold">● HOT</span>}</p><p className="text-xs text-muted-foreground truncate">{item.description}</p></div>
-                      <span className="text-sm font-semibold shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.price, defaultCurrency(config))}</span>
-                      <span className="text-[10px] text-muted-foreground shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{item.currencyCode ?? config.defaultCurrencyCode}</span>
-                      <span className="text-[11px] text-muted-foreground shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>C:{fmt(item.cost ?? 0, defaultCurrency(config))}</span>
-                      <span className={`text-xs shrink-0 ${item.stock===0?"text-red-400":item.stock===-1?"text-muted-foreground":"text-green-400"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{item.stock===-1?"∞":`${item.stock}`}</span>
-                      <button onClick={() => { setEditingProduct(item); setProductForm({...item}); }} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>
-                      <button onClick={() => update({ menu: menu.filter((m) => m.id!==item.id) })} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>
-                    </div>
-                  ))}
-                </div>
-              ); })}
+              <div className="rounded-xl border border-border bg-card/30 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-white/5 border-b border-border">
+                      <th className="px-4 py-3 text-left text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Product</th>
+                      <th className="px-4 py-3 text-left text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Category</th>
+                      <th className="px-4 py-3 text-right text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Price</th>
+                      <th className="px-4 py-3 text-center text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Currency</th>
+                      <th className="px-4 py-3 text-right text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Cost</th>
+                      <th className="px-4 py-3 text-center text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Stock</th>
+                      <th className="px-4 py-3 text-center text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Status</th>
+                      <th className="px-4 py-3 text-right text-[10px] uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {menu.map((item) => (
+                      <tr key={item.id} className="border-b border-border/50 hover:bg-white/3">
+                        <td className="px-4 py-2.5">
+                          <p className="text-sm font-medium">{item.name}</p>
+                          <p className="text-xs text-muted-foreground truncate max-w-[200px]">{item.description}</p>
+                        </td>
+                        <td className="px-4 py-2.5 text-xs text-muted-foreground">{item.category}</td>
+                        <td className="px-4 py-2.5 text-right text-sm font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.price, defaultCurrency(config))}</td>
+                        <td className="px-4 py-2.5 text-center text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{item.currencyCode ?? config.defaultCurrencyCode}</td>
+                        <td className="px-4 py-2.5 text-right text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.cost ?? 0, defaultCurrency(config))}</td>
+                        <td className="px-4 py-2.5 text-center text-xs" style={{ fontFamily: "'DM Mono', monospace" }}>
+                          <span className={item.stock===0?"text-red-400":item.stock===-1?"text-muted-foreground":"text-green-400"}>{item.stock===-1?"∞":`${item.stock}`}</span>
+                        </td>
+                        <td className="px-4 py-2.5 text-center">
+                          {item.stock===0 ? <span className="text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded">OUT</span> : item.popular ? <span className="text-[10px] text-primary font-bold">● HOT</span> : <span className="text-[10px] text-muted-foreground">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                          <button onClick={() => { setEditingProduct(item); setProductForm({...item}); }} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>
+                          <button onClick={() => update({ menu: menu.filter((m) => m.id!==item.id) })} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>
+                        </td>
+                      </tr>
+                    ))}
+                    {menu.length === 0 && (
+                      <tr><td colSpan={8} className="px-4 py-8 text-center text-sm text-muted-foreground">No products yet. Click "Add Product" to create one.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 
@@ -3630,7 +3666,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
 
       {payingTab && <PaymentModal tab={payingTab} tenant={tenant} staffId={staffId} onClose={()=>setPayingTab(null)} onComplete={handlePaymentComplete} />}
       {showNewTab && <NewTabModal tenant={tenant} onClose={()=>setShowNewTab(false)} onCreate={createTab} />}
-      {pendingSale && <ReceiptModal sale={pendingSale} businessInfo={tenant.businessInfo} receiptTemplate={tenant.config.receiptTemplate} onClose={()=>setPendingSale(null)} />}
+      {pendingSale && <ReceiptModal sale={pendingSale} businessInfo={tenant.businessInfo} receiptTemplate={tenant.config.receiptTemplate} staffName={staff?.name ?? ""} onClose={()=>setPendingSale(null)} />}
     </div>
   );
 }
