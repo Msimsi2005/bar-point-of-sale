@@ -1289,7 +1289,7 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
 // RECEIPT MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; receiptTemplate: ReceiptTemplate; staffName: string; onClose: () => void; }) {
+function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers, defaultPrinterId, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; receiptTemplate: ReceiptTemplate; staffName: string; printers: HardwareDevice[]; defaultPrinterId?: string; onClose: () => void; }) {
   const printRef = useRef<HTMLDivElement>(null);
   const [printError, setPrintError] = useState("");
 
@@ -2176,6 +2176,8 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
   const [newScannerName, setNewScannerName] = useState("");
   const [newScannerConnection, setNewScannerConnection] = useState<HardwareDevice["connection"]>("usb");
   const [newScannerTarget, setNewScannerTarget] = useState("");
+  const [scanningPrinters, setScanningPrinters] = useState(false);
+  const [printerMessage, setPrinterMessage] = useState("");
   const [loginEmailForm, setLoginEmailForm] = useState(tenant.email);
   const [newLoginPassword, setNewLoginPassword] = useState("");
   const [confirmLoginPassword, setConfirmLoginPassword] = useState("");
@@ -3666,7 +3668,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
 
       {payingTab && <PaymentModal tab={payingTab} tenant={tenant} staffId={staffId} onClose={()=>setPayingTab(null)} onComplete={handlePaymentComplete} />}
       {showNewTab && <NewTabModal tenant={tenant} onClose={()=>setShowNewTab(false)} onCreate={createTab} />}
-      {pendingSale && <ReceiptModal sale={pendingSale} businessInfo={tenant.businessInfo} receiptTemplate={tenant.config.receiptTemplate} staffName={staff?.name ?? ""} onClose={()=>setPendingSale(null)} />}
+      {pendingSale && <ReceiptModal sale={pendingSale} businessInfo={tenant.businessInfo} receiptTemplate={tenant.config.receiptTemplate} staffName={staff?.name ?? ""} printers={config.printers ?? []} defaultPrinterId={config.defaultPrinterId} onClose={()=>setPendingSale(null)} />}
     </div>
   );
 }
