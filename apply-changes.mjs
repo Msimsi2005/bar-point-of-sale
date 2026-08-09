@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from 'fs';
 const file = 'src/app/App.tsx';
 let content = readFileSync(file, 'utf8');
 
-// 1. Add printer discovery helpers after fillReceiptPlaceholders
+// 1. Add printer discovery helpers after fillReceiptPlaceholders function
 const printerHelpers = `
 interface DiscoveredPrinterInfo { name?: string; displayName?: string; description?: string; uri?: string; address?: string; }
 
@@ -68,127 +68,45 @@ function trySilentPrint(html: string, onFallback?: () => void) {
 }
 `;
 
-const placeholderEnd = `.replace(/{{\\s*paymentMethod\\s*}}/gi, sale.paymentMethod || "Unknown");\n}`;
+// Find the end of fillReceiptPlaceholders function
+const fillEnd = '    .replace(/{{\\s*paymentMethod\\s*}}/gi, sale.paymentMethod || "Unknown");\n}';
 if (!content.includes('discoverPrinters')) {
-  content = content.replace(placeholderEnd, placeholderEnd + '\n' + printerHelpers);
+  const idx = content.indexOf(fillEnd);
+  if (idx !== -1) {
+    content = content.slice(0, idx + fillEnd.length) + '\n' + printerHelpers + content.slice(idx + fillEnd.length);
+    console.log('Added printer helpers');
+  } else {
+    console.log('Could not find fillReceiptPlaceholders end');
+  }
 }
 
-// 2. Update ReceiptModal to accept printers and use silent print
-const oldReceiptModal = `function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; receiptTemplate: ReceiptTemplate; staffName: string; onClose: () => void; }) {`;
-const newReceiptModal = `function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers, defaultPrinterId, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; receiptTemplate: ReceiptTemplate; staffName: string; printers: HardwareDevice[]; defaultPrinterId?: string; onClose: () => void; }) {`;
-if (content.includes(oldReceiptModal)) {
-  content = content.replace(oldReceiptModal, newReceiptModal);
+// 2. Update ReceiptModal signature
+const oldSig = 'function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, onClose }';
+const newSig = 'function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers, defaultPrinterId, onClose }';
+if (content.includes(oldSig)) {
+  content = content.replace(oldSig, newSig);
+  console.log('Updated ReceiptModal signature');
 }
 
-// 3. Update handlePrint to use silent print when default printer exists
-const oldHandlePrint = `  function handlePrint() {
-    setPrintError("");
-    const w = window.open("", "_blank", "width=420,height=640");
-    if (!w) {
-      setPrintError("Popup blocked. Allow popups for this site and try again.");
-      return;
-    }
-
-    const logo = receiptTemplate.showLogo && businessInfo.logo
-      ? \`<img src="\${businessInfo.logo}" style="height:40px;display:block;margin:0 auto 8px;" />\`
-      : "";
-
-    const printHtml = \``;
-
-const newHandlePrint = `  function handlePrint() {
-    setPrintError("");
-    const hasDefaultPrinter = printers.some((p) => p.id === defaultPrinterId && p.enabled);
-    if (hasDefaultPrinter) {
-      const logo = receiptTemplate.showLogo && businessInfo.logo
-        ? \`<img src="\${businessInfo.logo}" style="height:40px;display:block;margin:0 auto 8px;" />\`
-        : "";
-      const printHtml = \`
-      <html>
-        <head>
-          <title>Receipt</title>
-          <style>
-            @page { size: 80mm auto; margin: 6mm; }
-            html, body { margin: 0; padding: 0; }
-            body { font-family: 'Courier New', monospace; font-size: 12px; width: 300px; margin: 0 auto; padding: 16px; color: #000; }
-            h2 { font-size: 14px; text-align: center; margin: 0; }
-            p { margin: 2px 0; }
-            .c { text-align: center; }
-            .s { font-size: 10px; color: #555; }
-            .line { border-top: 1px dashed #000; margin: 8px 0; }
-            .row { display: flex; justify-content: space-between; gap: 8px; }
-            .bold { font-weight: bold; }
-            .item { margin-bottom: 6px; }
-            .desc { font-size: 9px; color: #777; margin: 1px 0 2px; }
-            @media print {
-              body { width: auto; padding: 0; }
-            }
-          </style>
-        </head>
-        <body>\${logo}\${printRef.current?.innerHTML ?? ""}</body>
-      </html>
-    \`;
-      trySilentPrint(printHtml, () => {
-        const fallbackWindow = window.open("", "_blank", "width=420,height=640");
-        if (!fallbackWindow) {
-          setPrintError("Popup blocked. Allow popups for this site and try again.");
-          return;
-        }
-        fallbackWindow.document.write(printHtml);
-        fallbackWindow.document.close();
-        const safeClose = () => {
-          setTimeout(() => {
-            try { fallbackWindow.close(); } catch { /* no-op */ }
-          }, 300);
-        };
-        fallbackWindow.addEventListener("afterprint", safeClose);
-        setTimeout(() => {
-          try {
-            fallbackWindow.focus();
-            fallbackWindow.print();
-          } catch {
-            setPrintError("Unable to open print dialog. Please print from your browser manually.");
-          }
-        }, 120);
-      });
-      return;
-    }
-
-    const w = window.open("", "_blank", "width=420,height=640");
-    if (!w) {
-      setPrintError("Popup blocked. Allow popups for this site and try again.");
-      return;
-    }
-
-    const logo = receiptTemplate.showLogo && businessInfo.logo
-      ? \`<img src="\${businessInfo.logo}" style="height:40px;display:block;margin:0 auto 8px;" />\`
-      : "";
-
-    const printHtml = \``;
-
-if (content.includes(oldHandlePrint)) {
-  content = content.replace(oldHandlePrint, newHandlePrint);
+// 3. Add hasDefaultPrinter check at start of handlePrint
+const oldPrintStart = '  function handlePrint() {\n    setPrintError("");\n    const w = window.open';
+const newPrintStart = '  function handlePrint() {\n    setPrintError("");\n    const hasDefaultPrinter = printers.some((p) => p.id === defaultPrinterId && p.enabled);\n    if (hasDefaultPrinter) {\n      const logo = receiptTemplate.showLogo && businessInfo.logo\n        ? `<img src="${businessInfo.logo}" style="height:40px;display:block;margin:0 auto 8px;" />`\n        : "";\n      const printHtml = `\n      <html>\n        <head>\n          <title>Receipt</title>\n          <style>\n            @page { size: 80mm auto; margin: 6mm; }\n            html, body { margin: 0; padding: 0; }\n            body { font-family: \'Courier New\', monospace; font-size: 12px; width: 300px; margin: 0 auto; padding: 16px; color: #000; }\n            h2 { font-size: 14px; text-align: center; margin: 0; }\n            p { margin: 2px 0; }\n            .c { text-align: center; }\n            .s { font-size: 10px; color: #555; }\n            .line { border-top: 1px dashed #000; margin: 8px 0; }\n            .row { display: flex; justify-content: space-between; gap: 8px; }\n            .bold { font-weight: bold; }\n            .item { margin-bottom: 6px; }\n            .desc { font-size: 9px; color: #777; margin: 1px 0 2px; }\n            @media print {\n              body { width: auto; padding: 0; }\n            }\n          </style>\n        </head>\n        <body>${logo}${printRef.current?.innerHTML ?? ""}</body>\n      </html>\n    `;\n      trySilentPrint(printHtml, () => {\n        const fallbackWindow = window.open("", "_blank", "width=420,height=640");\n        if (!fallbackWindow) {\n          setPrintError("Popup blocked. Allow popups for this site and try again.");\n          return;\n        }\n        fallbackWindow.document.write(printHtml);\n        fallbackWindow.document.close();\n        const safeClose = () => {\n          setTimeout(() => {\n            try { fallbackWindow.close(); } catch { /* no-op */ }\n          }, 300);\n        };\n        fallbackWindow.addEventListener("afterprint", safeClose);\n        setTimeout(() => {\n          try {\n            fallbackWindow.focus();\n            fallbackWindow.print();\n          } catch {\n            setPrintError("Unable to open print dialog. Please print from your browser manually.");\n          }\n        }, 120);\n      });\n      return;\n    }\n\n    const w = window.open';
+if (content.includes(oldPrintStart)) {
+  content = content.replace(oldPrintStart, newPrintStart);
+  console.log('Added silent print logic');
 }
 
 // 4. Update ReceiptModal call in POSView
-const oldCall = `{pendingSale && <ReceiptModal sale={pendingSale} businessInfo={tenant.businessInfo} receiptTemplate={tenant.config.receiptTemplate} staffName={staff?.name ?? ""} onClose={()=>setPendingSale(null)} />}`;
-const newCall = `{pendingSale && <ReceiptModal sale={pendingSale} businessInfo={tenant.businessInfo} receiptTemplate={tenant.config.receiptTemplate} staffName={staff?.name ?? ""} printers={config.printers ?? []} defaultPrinterId={config.defaultPrinterId} onClose={()=>setPendingSale(null)} />}`;
+const oldCall = 'staffName={staff?.name ?? ""} onClose={()=>setPendingSale(null)} />}';
+const newCall = 'staffName={staff?.name ?? ""} printers={config.printers ?? []} defaultPrinterId={config.defaultPrinterId} onClose={()=>setPendingSale(null)} />}';
 if (content.includes(oldCall)) {
   content = content.replace(oldCall, newCall);
+  console.log('Updated ReceiptModal call');
 }
 
-// 5. Add scan state to AdminPanel
-const oldState = `  const [newScannerTarget, setNewScannerTarget] = useState("");`;
-const newState = `  const [newScannerTarget, setNewScannerTarget] = useState("");
-  const [scanningPrinters, setScanningPrinters] = useState(false);
-  const [printerMessage, setPrinterMessage] = useState("");`;
-if (content.includes(oldState)) {
-  content = content.replace(oldState, newState);
-}
-
-// 6. Add Scan for Printers button before manual add
-const oldAddPrinter = `                    <div className="space-y-1.5">
-                      <input value={newPrinterName} onChange={(e) => setNewPrinterName(e.target.value)} placeholder="Printer name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />`;
-const newAddPrinter = `                    <div className="space-y-1.5">
+// 5. Add Scan for Printers button before manual add
+const oldAddBtn = 'placeholder="Printer name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />';
+const scanBtn = `placeholder="Printer name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
                       <button
                         onClick={async () => {
                           setScanningPrinters(true);
@@ -222,14 +140,14 @@ const newAddPrinter = `                    <div className="space-y-1.5">
                         <Printer size={12} className={scanningPrinters ? "animate-pulse" : ""} />
                         {scanningPrinters ? "Scanning system printers…" : "Scan for Printers"}
                       </button>
-                      {printerMessage && <p className="text-[10px] text-muted-foreground rounded-lg bg-white/3 border border-border px-3 py-2">{printerMessage}</p>}
-                      <input value={newPrinterName} onChange={(e) => setNewPrinterName(e.target.value)} placeholder="Printer name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />`;
-if (content.includes(oldAddPrinter)) {
-  content = content.replace(oldAddPrinter, newAddPrinter);
+                      {printerMessage && <p className="text-[10px] text-muted-foreground rounded-lg bg-white/3 border border-border px-3 py-2">{printerMessage}</p>}`;
+if (content.includes(oldAddBtn)) {
+  content = content.replace(oldAddBtn, scanBtn);
+  console.log('Added Scan for Printers button');
 }
 
-// 7. Update receipt layout: item descriptions and total at top
-const oldReceiptLayout = `            <div className="line" />
+// 6. Update receipt layout: item descriptions and total at top
+const oldLayout = `            <div className="line" />
             {sale.items.map((o, i) => (
               <div key={i} className="item">
                 <div className="row"><span className="bold">{o.menuItem.name}</span><span>{sale.currencySymbol}{o.menuItem.price.toFixed(2)}</span></div>
@@ -243,7 +161,7 @@ const oldReceiptLayout = `            <div className="line" />
             <div className="line" />
             <div className="row bold"><span>TOTAL</span><span>{sale.currencySymbol}{sale.totalConverted.toFixed(2)}</span></div>`;
 
-const newReceiptLayout = `            <div className="line" />
+const newLayout = `            <div className="line" />
             {/* Item descriptions at the top */}
             {sale.items.map((o, i) => (
               <div key={i} className="item">
@@ -259,9 +177,10 @@ const newReceiptLayout = `            <div className="line" />
             <div className="row"><span>Subtotal</span><span>{sale.currencySymbol}{sale.subtotal.toFixed(2)}</span></div>
             {sale.tax > 0 && <div className="row"><span>VAT</span><span>{sale.currencySymbol}{sale.tax.toFixed(2)}</span></div>}`;
 
-if (content.includes(oldReceiptLayout)) {
-  content = content.replace(oldReceiptLayout, newReceiptLayout);
+if (content.includes(oldLayout)) {
+  content = content.replace(oldLayout, newLayout);
+  console.log('Updated receipt layout');
 }
 
 writeFileSync(file, content, 'utf8');
-console.log('Changes applied successfully.');
+console.log('All changes applied successfully.');
