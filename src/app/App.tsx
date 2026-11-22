@@ -3904,6 +3904,7 @@ export default function App() {
   const persistTenantSnapshot = useCallback((snapshot: Tenant) => {
     if (!tenantToken) return;
     apiSaveTenant(snapshot.email, makeTenantSavePatch(snapshot), tenantToken).then((saved) => {
+      if (typeof saved?.tenantToken === "string" && saved.tenantToken) setTenantToken(saved.tenantToken);
       const nextUpdatedAt = typeof saved?.updatedAt === "string" ? saved.updatedAt : "";
       if (!nextUpdatedAt) return;
       setTenant((current) => {

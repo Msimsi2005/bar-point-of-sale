@@ -476,6 +476,7 @@ function publicStaff(staff: any[]) {
 async function mergeStaffPins(existing: any[], incoming: any[]) {
   const previous = new Map((existing ?? []).map((member) => [member?.id, member]));
   const next = [];
+  const endedIds: string[] = [];
   for (const member of incoming ?? []) {
     const prior = previous.get(member?.id);
     const incomingPin = typeof member?.pin === "string" ? member.pin.trim() : "";
@@ -487,8 +488,25 @@ async function mergeStaffPins(existing: any[], incoming: any[]) {
       pin,
       pinMustChange: pinChanged ? incomingPin === "1234" : Boolean(prior?.pinMustChange),
     });
+    if (pinChanged && member?.id) endedIds.push(String(member.id));
   }
-  return next;
+  const kept = new Set(next.map((member) => member?.id));
+  for (const member of existing ?? []) {
+    if (member?.id && !kept.has(member.id)) endedIds.push(String(member.id));
+  }
+  return { staff: next, endedIds };
+}
+
+function withEndedStaffSessions(config: any, staffIds: string[]) {
+  const current = config ?? {};
+  const versions = {
+    ...(current.staffSessionVersion && typeof current.staffSessionVersion === "object" ? current.staffSessionVersion : {}),
+  };
+  for (const id of staffIds) {
+    if (!id) continue;
+    versions[id] = Number(versions[id] ?? 0) + 1;
+  }
+  return { ...current, staffSessionVersion: versions };
 }
 
 function mergeConfig(existing: any, incoming: any, permissions: Record<string, boolean>) {
@@ -1102,11 +1120,17 @@ app.put("/server/tenant/:email", async (c) => {
 
   const body = await c.req.json();
   const patch: any = {};
+  let endedStaffIds: string[] = [];
   if (body.businessInfo !== undefined && permissions.editBusiness) patch.business_info = body.businessInfo;
   if (body.menu !== undefined && permissions.editProducts) patch.menu = body.menu;
   if (body.customers !== undefined && permissions.manageCustomers) patch.customers = body.customers;
-  if (body.staff !== undefined && permissions.manageStaff) patch.staff = await mergeStaffPins(existing.staff ?? [], body.staff);
+  if (body.staff !== undefined && permissions.manageStaff) {
+    const merged = await mergeStaffPins(existing.staff ?? [], body.staff);
+    patch.staff = merged.staff;
+    endedStaffIds = merged.endedIds;
+  }
   if (body.config !== undefined) patch.config = mergeConfig(existing.config ?? {}, body.config, permissions);
+  if (endedStaffIds.length > 0) patch.config = withEndedStaffSessions(patch.config ?? existing.config ?? {}, endedStaffIds);
   if (Object.keys(patch).length === 0) return c.json(toTenantResponse(existing, []));
 
   let query = supabase.from("tenants").update(patch).eq("email", email);
@@ -1117,7 +1141,21 @@ app.put("/server/tenant/:email", async (c) => {
   if (updateError) return c.json({ error: updateError.message }, 400);
   if (!updated) return c.json({ error: "Save conflict. Reload the latest data." }, 409);
 
-  return c.json(toTenantResponse(updated, []));
+  const actor = c.get("tenantAuth");
+  const actorId = actor?.staffId ? String(actor.staffId) : "";
+  let refreshedToken: string | undefined;
+  if (actorId && endedStaffIds.includes(actorId)) {
+    const versions = updated.config?.staffSessionVersion && typeof updated.config.staffSessionVersion === "object"
+      ? updated.config.staffSessionVersion
+      : {};
+    refreshedToken = await createTenantToken(email, {
+      staffId: actorId,
+      jti: crypto.randomUUID(),
+      v: Number(updated.config?.authVersion ?? 0),
+      sv: Number(versions[actorId] ?? 0),
+    });
+  }
+  return c.json(toTenantResponse(updated, [], refreshedToken));
 });
 
 app.patch("/server/tenant/:email/credentials", async (c) => {
@@ -1185,11 +1223,7 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
 
   if (pinStaffId) {
     const currentConfig = { ...(existing.config ?? {}), ...(updates.config as object ?? {}) };
-    const versions = {
-      ...(currentConfig.staffSessionVersion && typeof currentConfig.staffSessionVersion === "object" ? currentConfig.staffSessionVersion : {}),
-    };
-    versions[pinStaffId] = Number(versions[pinStaffId] ?? 0) + 1;
-    updates.config = { ...currentConfig, staffSessionVersion: versions };
+    updates.config = withEndedStaffSessions(currentConfig, [pinStaffId]);
   }
 
   const { data: updated, error: updateError } = await supabase
