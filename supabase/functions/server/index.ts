@@ -1167,7 +1167,7 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
 
   if (Object.keys(updates).length === 0) return c.json({ error: "No credential changes supplied" }, 400);
 
-  if (updates.password_hash || updates.email) {
+  if (updates.password_hash || updates.email || updates.staff) {
     const currentConfig = existing.config ?? {};
     updates.config = { ...currentConfig, ...(updates.config as object ?? {}), authVersion: Number(currentConfig.authVersion ?? 0) + 1 };
   }
@@ -1270,6 +1270,9 @@ app.post("/server/tenant/:email/sale", async (c) => {
     const config = tenant.config ?? {};
     const currencies = config.currencies ?? [];
     const accountAction = incoming.accountAction;
+    const creditAction = accountAction === "on-account" || accountAction === "settlement" || accountAction === "deposit";
+    if (creditAction && config.allowCredits === false) return c.json({ error: "Customer credit is disabled" }, 403);
+    if (creditAction && !incoming.customerId) return c.json({ error: "Customer is required" }, 400);
     const lines = accountAction === "settlement" || accountAction === "deposit"
       ? []
       : (Array.isArray(incoming.items) ? incoming.items : []);
@@ -1308,9 +1311,10 @@ app.post("/server/tenant/:email/sale", async (c) => {
     const delta = creditDelta(accountAction, parts.total, accountAmountBase);
     const customers = JSON.parse(JSON.stringify(tenant.customers ?? []));
     const movesSpend = !accountAction || accountAction === "purchase" || accountAction === "on-account";
-    if (incoming.customerId && (delta !== 0 || movesSpend)) {
+    if (incoming.customerId && (delta !== 0 || movesSpend || creditAction)) {
       const customer = customers.find((entry: any) => entry?.id === incoming.customerId);
       if (!customer) return c.json({ error: "Customer not found" }, 400);
+      if (creditAction && customer.creditAllowed === false) return c.json({ error: "This customer is not allowed credit" }, 403);
       if (delta !== 0) {
         const currentCredit = Number(customer.creditBalance ?? customer.credit ?? 0);
         customer.creditBalance = roundMoney(currentCredit + delta);

@@ -1222,7 +1222,12 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
     setChangeError("");
     try {
       const response = await apiUpdateTenantCredentials(tenant.email, { staffId: replacement.staffId, pin: nextPin }, replacement.staffToken);
-      onSelect(replacement.staffId, response.tenantToken ?? replacement.staffToken, rowToTenant(response));
+      const refreshed = rowToTenant(response);
+      const returnedSales = Array.isArray(response?.sales) ? response.sales : [];
+      onSelect(replacement.staffId, response.tenantToken ?? replacement.staffToken, {
+        ...refreshed,
+        sales: returnedSales.length > 0 ? refreshed.sales : tenant.sales,
+      });
     } catch (e: unknown) {
       setChangeError(e instanceof Error ? e.message : "The new PIN was not saved.");
       setChanging(false);

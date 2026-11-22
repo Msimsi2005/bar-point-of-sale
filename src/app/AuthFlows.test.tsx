@@ -8,6 +8,8 @@ vi.mock("../lib/api", async () => {
   return {
     ...actual,
     apiLogin: vi.fn(),
+    apiStartStaffSession: vi.fn(),
+    apiUpdateTenantCredentials: vi.fn(),
   };
 });
 
@@ -132,5 +134,34 @@ describe("StaffSelector", () => {
     }
 
     await waitFor(() => expect(onSelect).toHaveBeenCalledWith("owner-1"));
+  });
+
+  it("keeps loaded sales when a new PIN replaces the default", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const loadedSale = { id: "sale-1", tabName: "Walk-in", total: 115 };
+    const apiStaff = { ...tenant.staff[0], pin: undefined, pinMustChange: true };
+    vi.mocked(api.apiStartStaffSession).mockResolvedValue({ staffToken: "staff-token", pinIsDefault: true, staff: apiStaff });
+    vi.mocked(api.apiUpdateTenantCredentials).mockResolvedValue({
+      ...tenant,
+      sales: [],
+      staff: [{ ...apiStaff, pinMustChange: false }],
+      tenantToken: "tenant-token-new",
+      createdAt: "2026-07-05T00:00:00.000Z",
+    });
+
+    render(<StaffSelector tenant={{ ...tenant, sales: [loadedSale], staff: [apiStaff] } as never} onSelect={onSelect} onBack={() => {}} />);
+    await user.click(screen.getByRole("button", { name: /Owner/i }));
+    for (const digit of ["1", "2", "3", "4"]) {
+      await user.click(screen.getByRole("button", { name: digit, exact: true }));
+    }
+    expect(await screen.findByRole("button", { name: "Save new PIN" })).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("New 4-digit PIN"), "4321");
+    await user.click(screen.getByRole("button", { name: "Save new PIN" }));
+
+    await waitFor(() => expect(onSelect).toHaveBeenCalled());
+    expect(onSelect.mock.calls[0]?.[0]).toBe("owner-1");
+    expect(onSelect.mock.calls[0]?.[1]).toBe("tenant-token-new");
+    expect(onSelect.mock.calls[0]?.[2].sales).toEqual([loadedSale]);
   });
 });
