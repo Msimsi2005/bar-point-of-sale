@@ -318,6 +318,55 @@ function clearAuthFailures(key: string, state?: SecurityState) {
   authFailures.delete(key);
 }
 
+function releaseOneAuthFailure(key: string, state: SecurityState) {
+  const entry = state.authFailures[key];
+  if (!entry) return getAuthLockState(key, state);
+  const failures = Math.max(0, Number(entry.failures ?? 0) - 1);
+  const maxFailures = Math.max(1, RATE_LIMITS.authMaxFailures);
+  if (failures <= 0) {
+    delete state.authFailures[key];
+    return { locked: false, retryAfterMs: 0 };
+  }
+  const lockMs = Math.max(1, RATE_LIMITS.authLockMinutes) * 60_000;
+  const lockedUntil = failures >= maxFailures
+    ? (Number(entry.lockedUntil ?? 0) > Date.now() ? Number(entry.lockedUntil) : Date.now() + lockMs)
+    : 0;
+  state.authFailures[key] = { failures, lockedUntil };
+  return getAuthLockState(key, state);
+}
+
+async function reserveStaffPinAttempt(supabase: any, pinKey: string, rateKey: string) {
+  let blocked = { locked: false, retryAfterMs: 0 };
+  let reserved = { failures: 0, locked: false, retryAfterMs: 0 };
+  await commitSecurityMutation(supabase, (state) => {
+    const lock = getAuthLockState(pinKey, state);
+    if (lock.locked) {
+      blocked = lock;
+      return false;
+    }
+    const rate = checkRateLimit("staff_pin_fail", rateKey, 8, 60_000, state);
+    if (!rate.allowed) {
+      blocked = { locked: true, retryAfterMs: rate.retryAfterMs };
+      return false;
+    }
+    reserved = recordAuthFailure(pinKey, state);
+  });
+  return { blocked, reserved };
+}
+
+async function releaseStaffPinAttempt(supabase: any, pinKey: string) {
+  let blocked = { locked: false, retryAfterMs: 0 };
+  try {
+    await commitSecurityMutation(supabase, (state) => {
+      blocked = releaseOneAuthFailure(pinKey, state);
+    });
+  } catch {
+    const fresh = await loadSecurityStateRecord(supabase);
+    blocked = getAuthLockState(pinKey, fresh.state);
+  }
+  return blocked;
+}
+
 function auditEvent(c: any, event: string, status: "ok" | "denied" | "error", details: Record<string, unknown> = {}) {
   const payload = {
     event,
@@ -1068,43 +1117,38 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
   if (auth?.staffId) return c.json({ error: "Use the venue login before choosing staff" }, 400);
   const { staffId, pin } = await c.req.json();
   const supabase = db();
-  let securityRecord: { config: any; state: SecurityState };
-  try {
-    securityRecord = await loadSecurityStateRecord(supabase);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to load security state" }, 500);
-  }
   const pinKey = authFailureKey("pin", `${email}:${String(staffId ?? "")}`, "staff");
-  const lockState = getAuthLockState(pinKey, securityRecord.state);
-  if (lockState.locked) {
-    c.header("Retry-After", String(Math.ceil(lockState.retryAfterMs / 1000)));
+  const rateKey = `${email}:${String(staffId ?? "")}`;
+  let attempt: { blocked: { locked: boolean; retryAfterMs: number }; reserved: { failures: number; locked: boolean; retryAfterMs: number } };
+  try {
+    attempt = await reserveStaffPinAttempt(supabase, pinKey, rateKey);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  }
+  if (attempt.blocked.locked) {
+    c.header("Retry-After", String(Math.ceil(attempt.blocked.retryAfterMs / 1000)));
     return c.json({ error: "Too many PIN attempts. Please retry shortly." }, 429);
   }
   const { data: tenant, error } = await loadTenant(supabase, email);
-  if (error) return c.json({ error: error.message }, 400);
-  if (!tenant) return c.json({ error: "Not found" }, 404);
-  if (tenant.config?.paused === true) return c.json({ error: "This business is paused. Contact superadmin." }, 403);
+  if (error || !tenant) {
+    await releaseStaffPinAttempt(supabase, pinKey);
+    if (error) return c.json({ error: error.message }, 400);
+    return c.json({ error: "Not found" }, 404);
+  }
+  if (tenant.config?.paused === true) {
+    await releaseStaffPinAttempt(supabase, pinKey);
+    return c.json({ error: "This business is paused. Contact superadmin." }, 403);
+  }
   const member = (tenant.staff ?? []).find((staff: any) => staff?.id === staffId);
   const supplied = String(pin ?? "");
   if (!/^\d{4}$/.test(supplied) || !member || !(await verifyPassword(supplied, String(member.pin ?? "")))) {
-    let failure = { failures: 0, locked: false, retryAfterMs: 0 };
-    let pinRate = { allowed: true, remaining: 0, retryAfterMs: 0 };
-    try {
-      await commitSecurityMutation(supabase, (state) => {
-        failure = recordAuthFailure(pinKey, state);
-        pinRate = checkRateLimit("staff_pin_fail", `${email}:${String(staffId ?? "")}`, 8, 60_000, state);
-      });
-    } catch (e: unknown) {
-      return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
-    }
-    if (failure.locked || !pinRate.allowed) {
-      const retryAfterMs = failure.locked ? failure.retryAfterMs : pinRate.retryAfterMs;
-      c.header("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
+    if (attempt.reserved.locked) {
+      c.header("Retry-After", String(Math.ceil(attempt.reserved.retryAfterMs / 1000)));
       return c.json({ error: "Too many PIN attempts. Please retry shortly." }, 429);
     }
     return c.json({ error: "Wrong PIN" }, 401);
   }
-  const stillLocked = await clearFailuresUnlessLocked(supabase, pinKey);
+  const stillLocked = await releaseStaffPinAttempt(supabase, pinKey);
   if (stillLocked.locked) {
     c.header("Retry-After", String(Math.ceil(stillLocked.retryAfterMs / 1000)));
     return c.json({ error: "Too many PIN attempts. Please retry shortly." }, 429);
@@ -1134,14 +1178,24 @@ app.post("/server/tenant/:email/logout", async (c) => {
   const auth = c.get("tenantAuth");
   if (!auth?.jti) return c.json({ ok: true });
   const supabase = db();
-  const { data: tenant, error } = await loadTenant(supabase, email);
-  if (error) return c.json({ error: error.message }, 400);
-  if (!tenant) return c.json({ ok: true });
-  const revoked = Array.isArray(tenant.config?.revokedJti) ? tenant.config.revokedJti : [];
-  const next = [...revoked, auth.jti].slice(-200);
-  const { error: updateError } = await supabase.from("tenants").update({ config: { ...tenant.config, revokedJti: next } }).eq("email", email);
-  if (updateError) return c.json({ error: updateError.message }, 400);
-  return c.json({ ok: true });
+  let lastError = "Failed to revoke session";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const { data: tenant, error } = await loadTenant(supabase, email);
+    if (error) return c.json({ error: error.message }, 400);
+    if (!tenant) return c.json({ ok: true });
+    const revoked = Array.isArray(tenant.config?.revokedJti) ? tenant.config.revokedJti : [];
+    if (revoked.includes(auth.jti)) return c.json({ ok: true });
+    const config = { ...(tenant.config ?? {}), revokedJti: [...revoked, auth.jti].slice(-200) };
+    let query = supabase.from("tenants").update({ config }).eq("email", email);
+    if (tenant.updated_at) query = query.eq("updated_at", tenant.updated_at);
+    const { data: saved, error: updateError } = await query.select("id").maybeSingle();
+    if (updateError) {
+      lastError = updateError.message;
+      continue;
+    }
+    if (saved) return c.json({ ok: true });
+  }
+  return c.json({ error: lastError }, 500);
 });
 
 // ── VENUE: save tenant ────────────────────────────────────────────────────────
@@ -1229,15 +1283,17 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
     }
   }
 
+  let nextPasswordHash = "";
   if (typeof body.password === "string") {
     const trimmedPassword = body.password.trim();
     if (trimmedPassword.length > 0) {
       if (trimmedPassword.length < 6) return c.json({ error: "Password must be at least 6 characters" }, 400);
-      updates.password_hash = await hashPassword(trimmedPassword);
+      nextPasswordHash = await hashPassword(trimmedPassword);
     }
   }
 
   let pinStaffId = "";
+  let nextPinHash = "";
   if (typeof body.pin === "string") {
     if (!/^\d{4}$/.test(body.pin)) return c.json({ error: "PIN must be exactly 4 digits" }, 400);
     if (body.pin === "1234") return c.json({ error: "Choose a PIN other than 1234" }, 400);
@@ -1248,34 +1304,48 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
     const actor = c.get("tenantAuth");
     if (staffId !== actor?.staffId && !permissions.manageStaff) return c.json({ error: "Not allowed" }, 403);
     pinStaffId = staffId;
-    updates.staff = staff.map((entry: any) => entry?.id === staffId ? { ...entry, pin: await hashPassword(body.pin), pinMustChange: false } : entry);
+    nextPinHash = await hashPassword(body.pin);
   }
 
-  if (Object.keys(updates).length === 0) return c.json({ error: "No credential changes supplied" }, 400);
+  if (!updates.email && !nextPasswordHash && !pinStaffId) return c.json({ error: "No credential changes supplied" }, 400);
 
-  if (updates.password_hash || updates.email) {
-    const currentConfig = existing.config ?? {};
-    updates.config = { ...currentConfig, ...(updates.config as object ?? {}), authVersion: Number(currentConfig.authVersion ?? 0) + 1 };
-  }
-
-  if (pinStaffId) {
-    const currentConfig = { ...(existing.config ?? {}), ...(updates.config as object ?? {}) };
-    updates.config = withEndedStaffSessions(currentConfig, [pinStaffId]);
-  }
-
-  const { data: updated, error: updateError } = await supabase
-    .from("tenants")
-    .update(updates)
-    .eq("email", email)
-    .select("id, email, business_info, config, menu, customers, staff, created_at, updated_at")
-    .single();
-  if (updateError) {
-    const message = String(updateError.message ?? "");
-    if (/foreign key|violates/i.test(message) && updates.email) {
-      return c.json({ error: "Email change is blocked until sales follow the new login email. Run src/lib/003_sales_email_on_update_cascade.sql, then try again." }, 409);
+  let updated: any = null;
+  let lastError = "Failed to save credentials";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const { data: current, error: currentError } = await loadTenant(supabase, email);
+    if (currentError) return c.json({ error: currentError.message }, 400);
+    if (!current) return c.json({ error: "Not found" }, 404);
+    const nextUpdates: Record<string, unknown> = {};
+    if (updates.email) nextUpdates.email = updates.email;
+    if (nextPasswordHash) nextUpdates.password_hash = nextPasswordHash;
+    if (pinStaffId) {
+      const staff = Array.isArray(current.staff) ? current.staff : [];
+      if (!staff.some((entry: any) => entry?.id === pinStaffId)) return c.json({ error: "Staff member not found" }, 404);
+      nextUpdates.staff = staff.map((entry: any) => entry?.id === pinStaffId ? { ...entry, pin: nextPinHash, pinMustChange: false } : entry);
     }
-    return c.json({ error: message }, 400);
+    let config = { ...(current.config ?? {}) };
+    if (nextPasswordHash || updates.email) config = { ...config, authVersion: Number(config.authVersion ?? 0) + 1 };
+    if (pinStaffId) config = withEndedStaffSessions(config, [pinStaffId]);
+    nextUpdates.config = config;
+    let query = supabase.from("tenants").update(nextUpdates).eq("email", email);
+    if (current.updated_at) query = query.eq("updated_at", current.updated_at);
+    const { data: saved, error: updateError } = await query
+      .select("id, email, business_info, config, menu, customers, staff, created_at, updated_at")
+      .maybeSingle();
+    if (updateError) {
+      const message = String(updateError.message ?? "");
+      if (/foreign key|violates/i.test(message) && updates.email) {
+        return c.json({ error: "Email change is blocked until sales follow the new login email. Run src/lib/003_sales_email_on_update_cascade.sql, then try again." }, 409);
+      }
+      lastError = message;
+      continue;
+    }
+    if (saved) {
+      updated = saved;
+      break;
+    }
   }
+  if (!updated) return c.json({ error: lastError }, 500);
 
   const actor = c.get("tenantAuth");
   const tokenStaffId = actor?.staffId ? String(actor.staffId) : "";
