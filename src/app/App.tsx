@@ -715,7 +715,7 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col" style={{ fontFamily: "'Barlow', sans-serif" }}>
       {/* Nav */}
-      <nav className="flex items-center justify-between px-8 py-4 border-b border-border sticky top-0 bg-background/90 backdrop-blur-sm z-20">
+      <nav className="flex items-center justify-between gap-3 px-4 sm:px-8 py-4 border-b border-border sticky top-0 bg-background/90 backdrop-blur-sm z-20">
         <div className="flex items-center gap-2.5">
           <AppBrandMark size="sm" />
           <span className="text-lg font-black tracking-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>MISTYPOS</span>
@@ -726,11 +726,11 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
       </nav>
 
       {/* Hero */}
-      <section className="flex-1 flex flex-col items-center justify-center px-8 py-24 text-center max-w-3xl mx-auto">
+      <section className="flex-1 flex flex-col items-center justify-center px-4 sm:px-8 py-16 sm:py-24 text-center max-w-3xl mx-auto">
         <div className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary font-semibold mb-6">
           <Zap size={11} /> Cloud POS Platform
         </div>
-        <h1 className="text-5xl md:text-6xl font-black text-foreground mb-5 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
+        <h1 className="text-4xl sm:text-5xl md:text-6xl font-black text-foreground mb-5 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
           MISTYPOS BUILT FOR<br /><span className="text-primary">BARS & VENUES</span>
         </h1>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 w-full max-w-4xl text-left mt-4">
@@ -745,7 +745,7 @@ function LandingPage({ onVenueLogin, onSuperAdmin }: { onVenueLogin: () => void;
       </section>
 
       {/* Footer — superadmin link (subtle) */}
-      <footer className="border-t border-border px-8 py-4 flex items-center justify-between">
+      <footer className="border-t border-border px-4 sm:px-8 py-4 flex items-center justify-between gap-3 flex-wrap">
         <p className="text-xs text-muted-foreground/40">© 2026 MISTYPOS. All rights reserved.</p>
         <button
           onClick={onSuperAdmin}
@@ -927,7 +927,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
   return (
     <div className="min-h-screen bg-background text-foreground" style={{ fontFamily: "'Barlow', sans-serif" }}>
       {/* Header */}
-      <header className="flex items-center justify-between px-6 py-4 border-b border-border bg-card/60 backdrop-blur-sm sticky top-0 z-10">
+      <header className="flex items-center justify-between gap-3 flex-wrap px-4 sm:px-6 py-4 border-b border-border bg-card/60 backdrop-blur-sm sticky top-0 z-10">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-primary/20 border border-primary/30 flex items-center justify-center"><Shield size={15} className="text-primary" /></div>
           <div>
@@ -943,7 +943,7 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
         </div>
       </header>
 
-      <div className="max-w-5xl mx-auto px-6 py-8 space-y-8">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-8">
         {/* Register new company */}
         <div className="rounded-2xl border border-primary/20 bg-primary/5 p-6">
           <div className="flex items-center gap-2 mb-5">
@@ -1243,7 +1243,7 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
   if (replacement && selected) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center px-4" style={{ fontFamily: "'Barlow', sans-serif" }}>
-        <div className="w-80 text-center">
+        <div className="w-full max-w-sm text-center">
           <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
           <p className="text-lg font-bold mb-1">{selected.name}</p>
           <p className="text-sm text-muted-foreground mb-4">1234 cannot open the owner tools. Choose a new PIN before this shift continues.</p>
@@ -1259,7 +1259,7 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
   if (selected) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center px-4" style={{ fontFamily: "'Barlow', sans-serif" }}>
-        <div className="w-72 text-center">
+        <div className="w-full max-w-xs text-center">
           <button onClick={() => { setSelected(null); setPin(""); }} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-8 mx-auto transition-colors"><ArrowLeft size={14} /> Back</button>
           <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
           <div className="w-14 h-14 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center mx-auto mb-3"><span className="text-primary text-xl font-bold">{selected.name[0]}</span></div>
@@ -1399,7 +1399,7 @@ function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-      <div className="w-[360px] max-h-[90vh] rounded-2xl border border-amber-900/30 bg-[#161210] shadow-2xl flex flex-col" style={{ fontFamily: "'Barlow', sans-serif" }}>
+      <div className="w-full max-w-[360px] max-h-[90vh] rounded-2xl border border-amber-900/30 bg-[#161210] shadow-2xl flex flex-col" style={{ fontFamily: "'Barlow', sans-serif" }}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-amber-900/20 shrink-0"><h2 className="font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Receipt</h2><button onClick={onClose} className="text-muted-foreground hover:text-foreground p-1 transition-colors"><X size={16} /></button></div>
         <div className="flex-1 overflow-y-auto px-5 py-4 text-sm">
           <div ref={printRef}>
@@ -1543,7 +1543,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-      <div className="w-[480px] max-h-[90vh] rounded-2xl border border-amber-900/30 bg-[#161210] shadow-2xl flex flex-col" style={{ fontFamily: "'Barlow', sans-serif" }}>
+      <div className="w-full max-w-[480px] max-h-[90vh] rounded-2xl border border-amber-900/30 bg-[#161210] shadow-2xl flex flex-col" style={{ fontFamily: "'Barlow', sans-serif" }}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-amber-900/20 shrink-0">
           <div><p className="text-[10px] tracking-widest text-muted-foreground uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>{tab.prepaid ? "Pre-Paid Tab" : "Checkout"}</p><h2 className="text-xl font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tab.name}</h2></div>
           <button onClick={onClose} className="p-2 text-muted-foreground hover:text-foreground transition-colors"><X size={18} /></button>
@@ -1725,7 +1725,7 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-      <div className="w-96 rounded-2xl border border-amber-900/30 bg-[#161210] shadow-2xl p-6" style={{ fontFamily: "'Barlow', sans-serif" }}>
+      <div className="w-full max-w-sm rounded-2xl border border-amber-900/30 bg-[#161210] shadow-2xl p-6" style={{ fontFamily: "'Barlow', sans-serif" }}>
         <h2 className="text-lg font-bold mb-4" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>Open New Tab</h2>
         <div className="space-y-3">
           <div>
@@ -2118,14 +2118,14 @@ export function SalesSection({ sales, currency: displayCurrency, staff = [], men
           </select>
         </label>
         <div className="flex flex-wrap items-end gap-1">
-          <button type="button" onClick={() => setQuickFilter("last-7")} className="rounded-lg border border-border px-2 py-2 text-xs">Preset Last 7 Days</button>
-          <button type="button" onClick={() => setQuickFilter("this-week")} className="rounded-lg border border-border px-2 py-2 text-xs">Preset This Week</button>
-          <button type="button" onClick={() => setQuickFilter("previous-week")} className="rounded-lg border border-border px-2 py-2 text-xs">Preset Previous Week</button>
-          <button type="button" onClick={() => { setQuickFilter("none"); setRangeFrom(""); setRangeTo(""); }} className="rounded-lg border border-border px-2 py-2 text-xs">Clear preset filter</button>
+          <button type="button" onClick={() => setQuickFilter("last-7")} className="rounded-lg border border-border px-2.5 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">Preset Last 7 Days</button>
+          <button type="button" onClick={() => setQuickFilter("this-week")} className="rounded-lg border border-border px-2.5 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">Preset This Week</button>
+          <button type="button" onClick={() => setQuickFilter("previous-week")} className="rounded-lg border border-border px-2.5 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">Preset Previous Week</button>
+          <button type="button" onClick={() => { setQuickFilter("none"); setRangeFrom(""); setRangeTo(""); }} className="rounded-lg border border-border px-2.5 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">Clear preset filter</button>
         </div>
         <div className="flex items-end justify-between gap-2">
           <p className="text-xs text-muted-foreground">Negative: {negativeSalesCount}</p>
-          <button type="button" onClick={() => setSalesScope("negative-only")} className="rounded-lg border border-border px-2 py-2 text-xs">Switch to Negative Sales Only</button>
+          <button type="button" onClick={() => setSalesScope("negative-only")} className="rounded-lg border border-border px-2.5 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">Switch to Negative Sales Only</button>
         </div>
       </div>
       {effectiveRangeActive && (
@@ -2163,7 +2163,7 @@ export function SalesSection({ sales, currency: displayCurrency, staff = [], men
           { label: "Gross Margin", value: `${grossMargin.toFixed(1)}%`, icon: Percent, color: grossMargin >= 0 ? "text-green-400" : "text-red-400" },
           { label: "Avg Ticket", value: fmt(avgTicket, currency), icon: Receipt, color: "text-cyan-400" },
         ].map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className="rounded-xl border border-border bg-card/40 px-4 py-3"><div className="flex items-center gap-1.5 mb-1"><Icon size={12} className={color} /><span className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>{label}</span></div><p className={`text-xl font-bold ${color}`} style={{ fontFamily: "'DM Mono', monospace" }}>{value}</p></div>
+          <div key={label} className="rounded-xl border border-border bg-card/40 px-4 py-3"><div className="flex items-center gap-1.5 mb-1"><Icon size={12} className={color} /><span className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>{label}</span></div><p className={`text-lg sm:text-xl font-bold tabular-nums leading-tight ${color}`} style={{ fontFamily: "'DM Mono', monospace" }}>{value}</p></div>
         ))}
       </div>
       <div className="rounded-xl border border-border bg-card/30 p-4 mb-5">
@@ -2215,8 +2215,8 @@ export function SalesSection({ sales, currency: displayCurrency, staff = [], men
           </div>
         )}
       </div>
-      <div className="grid grid-cols-5 gap-4 mb-5">
-        <div className="col-span-3 rounded-xl border border-border bg-card/30 p-4">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 mb-5">
+        <div className="lg:col-span-3 rounded-xl border border-border bg-card/30 p-4 min-w-0">
           <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Fast-Moving Products</p>
           {topItems.length === 0 ? <p className="text-xs text-muted-foreground">No data.</p> : (
             <div className="space-y-2">
@@ -2240,7 +2240,7 @@ export function SalesSection({ sales, currency: displayCurrency, staff = [], men
             </div>
           )}
         </div>
-        <div className="col-span-2 rounded-xl border border-border bg-card/30 p-4">
+        <div className="lg:col-span-2 rounded-xl border border-border bg-card/30 p-4 min-w-0">
           <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>By Method</p>
           {Object.entries(payBreak).length === 0 ? <p className="text-xs text-muted-foreground">No data.</p> : Object.entries(payBreak).sort(([,a],[,b]) => b-a).map(([m, amount]) => <div key={m} className="flex justify-between items-center mb-1.5"><span className="text-xs text-muted-foreground truncate">{m}</span><span className="text-xs font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(amount, currency)}</span></div>)}
         </div>
@@ -2691,13 +2691,13 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
         </div>
         <span className="text-[10px] font-bold px-2 py-0.5 rounded border text-muted-foreground border-border" style={{ fontFamily: "'DM Mono', monospace" }}>MANAGED ACCOUNT</span>
       </header>
-      <div className="flex flex-1 overflow-hidden">
-        <aside className="w-44 shrink-0 border-r border-border bg-card/30 flex flex-col py-3 gap-0.5 px-2 overflow-y-auto">
+      <div className="flex flex-col md:flex-row flex-1 overflow-hidden min-h-0">
+        <aside className="w-full md:w-44 md:shrink-0 border-b md:border-b-0 md:border-r border-border bg-card/30 flex flex-row md:flex-col py-2 md:py-3 gap-1 px-2 overflow-x-auto md:overflow-y-auto">
           {allowedNavItems.map(({ id, label, icon: Icon }) => (
-            <button key={id} onClick={() => { setSection(id); setEditingProduct(null); setProductForm(emptyProduct()); }} className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-all ${section === id ? "bg-primary/15 text-primary border border-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-white/5"}`}><Icon size={14} /> {label}</button>
+            <button key={id} onClick={() => { setSection(id); setEditingProduct(null); setProductForm(emptyProduct()); }} className={`shrink-0 flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${section === id ? "bg-primary/15 text-primary border border-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-white/5 border border-transparent"}`}><Icon size={14} /> {label}</button>
           ))}
         </aside>
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 min-w-0">
 
           {section === "products" && (
             <div className="max-w-4xl">
@@ -2961,15 +2961,15 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
               {editingProduct && (
                 <div className="rounded-xl border border-border bg-card/40 p-5 mb-5">
                   <p className="text-xs font-semibold text-muted-foreground mb-4 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Editing: {editingProduct.name}</p>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div><label className="text-xs text-muted-foreground mb-1 block">Name *</label><input value={productForm.name} onChange={(e) => setProductForm({...productForm, name: e.target.value})} placeholder="Product name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Category</label><select value={productForm.category} onChange={(e) => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{enabledCats.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Currency</label><select value={productForm.currencyCode ?? config.defaultCurrencyCode} onChange={(e) => setProductForm({...productForm, currencyCode: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{config.currencies.filter((c) => c.enabled).map((c) => <option key={c.code} value={c.code}>{c.code} — {c.symbol} (1 ZAR = {c.rate})</option>)}</select></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Price ({config.currencies.find((c) => c.code === (productForm.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? defaultCurrency(config).symbol}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({config.currencies.find((c) => c.code === (productForm.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? defaultCurrency(config).symbol})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Stock (-1 = ∞)</label><input type="number" min="-1" value={productForm.stock} onChange={(e) => setProductForm({...productForm, stock: parseInt(e.target.value)??-1})} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                    <div className="col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                    <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop" className="text-sm text-muted-foreground">Popular</label></div>
+                    <div className="sm:col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div className="sm:col-span-2 flex items-center gap-2"><input type="checkbox" id="pop" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop" className="text-sm text-muted-foreground">Popular</label></div>
                   </div>
                   <div className="flex gap-2 mt-4">
                     <button onClick={saveProduct} disabled={!productForm.name.trim()||productForm.price<=0||productSaving} className={`flex items-center gap-1.5 rounded-lg px-5 py-2.5 text-sm font-semibold transition-all disabled:opacity-30 ${productSaved ? "bg-green-600 text-white" : "bg-primary text-primary-foreground hover:opacity-90"}`}>{productSaving ? <><span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />Saving…</> : productSaved ? <><Check size={13} /> Saved</> : <><Save size={13} />Save</>}</button>
@@ -2984,15 +2984,15 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                     <DialogTitle>Add New Product</DialogTitle>
                     <DialogDescription>Fill in the details below to add a new product to your menu.</DialogDescription>
                   </DialogHeader>
-                  <div className="grid grid-cols-2 gap-3 py-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 py-2">
                     <div><label className="text-xs text-muted-foreground mb-1 block">Name *</label><input autoFocus value={productForm.name} onChange={(e) => setProductForm({...productForm, name: e.target.value})} placeholder="Product name" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Category</label><select value={productForm.category} onChange={(e) => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{enabledCats.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Currency</label><select value={productForm.currencyCode ?? config.defaultCurrencyCode} onChange={(e) => setProductForm({...productForm, currencyCode: e.target.value})} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">{config.currencies.filter((c) => c.enabled).map((c) => <option key={c.code} value={c.code}>{c.code} — {c.symbol} (1 ZAR = {c.rate})</option>)}</select></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Price ({config.currencies.find((c) => c.code === (productForm.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? defaultCurrency(config).symbol}) *</label><input type="number" min="0" value={productForm.price || ""} onChange={(e) => setProductForm({...productForm, price: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Cost ({config.currencies.find((c) => c.code === (productForm.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? defaultCurrency(config).symbol})</label><input type="number" min="0" value={productForm.cost || ""} onChange={(e) => setProductForm({...productForm, cost: parseFloat(e.target.value)||0})} placeholder="0.00" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
                     <div><label className="text-xs text-muted-foreground mb-1 block">Stock (-1 = ∞)</label><input type="number" min="-1" value={productForm.stock} onChange={(e) => setProductForm({...productForm, stock: parseInt(e.target.value)??-1})} className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                    <div className="col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-                    <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="pop-modal" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop-modal" className="text-sm text-muted-foreground">Popular</label></div>
+                    <div className="sm:col-span-2"><label className="text-xs text-muted-foreground mb-1 block">Description</label><input value={productForm.description} onChange={(e) => setProductForm({...productForm, description: e.target.value})} placeholder="Ingredients or details" className="w-full rounded-lg bg-white/5 border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
+                    <div className="sm:col-span-2 flex items-center gap-2"><input type="checkbox" id="pop-modal" checked={!!productForm.popular} onChange={(e) => setProductForm({...productForm, popular: e.target.checked})} className="accent-amber-500 w-4 h-4" /><label htmlFor="pop-modal" className="text-sm text-muted-foreground">Popular</label></div>
                   </div>
                   <DialogFooter>
                     <button onClick={() => { setShowAddProductModal(false); setProductForm(emptyProduct()); }} className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground">Cancel</button>
@@ -3000,7 +3000,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
-              <div className="rounded-xl border border-border bg-card/30 overflow-hidden">
+              <div className="rounded-xl border border-border bg-card/30 overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-white/5 border-b border-border">
@@ -3022,14 +3022,14 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                           <p className="text-xs text-muted-foreground truncate max-w-[200px]">{item.description}</p>
                         </td>
                         <td className="px-4 py-2.5 text-xs text-muted-foreground">{item.category}</td>
-                        <td className="px-4 py-2.5 text-right text-sm font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{(config.currencies.find((currency) => currency.code === (item.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? "R")}{item.price.toFixed(2)}</td>
+                        <td className="px-4 py-2.5 text-right text-sm font-semibold tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{(config.currencies.find((currency) => currency.code === (item.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? "R")}{item.price.toFixed(2)}</td>
                         <td className="px-4 py-2.5 text-center text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{item.currencyCode ?? config.defaultCurrencyCode}</td>
                         <td className="px-4 py-2.5 text-right text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{(config.currencies.find((currency) => currency.code === (item.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? "R")}{(item.cost ?? 0).toFixed(2)}</td>
                         <td className="px-4 py-2.5 text-center text-xs" style={{ fontFamily: "'DM Mono', monospace" }}>
                           <span className={item.stock===0?"text-red-400":item.stock===-1?"text-muted-foreground":"text-green-400"}>{item.stock===-1?"∞":`${item.stock}`}</span>
                         </td>
                         <td className="px-4 py-2.5 text-center">
-                          {item.stock===0 ? <span className="text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded">OUT</span> : item.popular ? <span className="text-[10px] text-primary font-bold">● HOT</span> : <span className="text-[10px] text-muted-foreground">—</span>}
+                          {item.stock===0 ? <span className="text-[10px] font-semibold text-red-400 bg-red-400/10 px-2 py-0.5 rounded-md">OUT</span> : item.popular ? <span className="text-[10px] text-primary font-bold">● HOT</span> : <span className="text-[10px] text-muted-foreground">—</span>}
                         </td>
                         <td className="px-4 py-2.5 text-right whitespace-nowrap">
                           <button onClick={() => { setEditingProduct(item); setProductForm({...item}); }} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>
@@ -3706,13 +3706,13 @@ export function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAd
 
   return (
     <div className="pos-shell h-screen w-screen overflow-hidden flex flex-col bg-background text-foreground select-none" style={{ fontFamily: "'Barlow', sans-serif" }}>
-      <Toaster position="top-center" offset={12} duration={2500} visibleToasts={3} closeButton={false} style={{ zIndex: 30, pointerEvents: "none" }} toastOptions={{ duration: 2500, className: "pos-toast", style: { pointerEvents: "none" } }} />
-      <header className="flex items-center justify-between px-5 py-3 border-b border-border bg-card/60 backdrop-blur-sm z-10 shrink-0">
+      <Toaster theme="dark" position="top-center" offset={12} duration={2500} visibleToasts={3} closeButton={false} style={{ zIndex: 30, pointerEvents: "none" }} toastOptions={{ duration: 2500, className: "pos-toast", style: { pointerEvents: "none", background: "#1e1a14", color: "#f0e6d3", border: "1px solid rgba(74, 222, 128, 0.35)" } }} />
+      <header className="flex items-center justify-between gap-3 flex-wrap px-4 sm:px-5 py-3 border-b border-border bg-card/60 backdrop-blur-sm z-10 shrink-0">
         <div className="flex items-center gap-2.5">
           <TenantBrandMark businessInfo={tenant.businessInfo} size="sm" />
           <span className="text-base font-black tracking-wider hidden sm:block" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>{tenant.businessInfo.name.toUpperCase()}</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
           <div className="hidden md:flex items-center gap-1 text-xs text-muted-foreground border border-border rounded-lg px-3 py-1.5"><Users size={12} /> {tabs.length}</div>
           <div className="hidden sm:flex items-center gap-1 text-xs text-muted-foreground border border-border rounded-lg px-3 py-1.5" style={{ fontFamily: "'DM Mono', monospace" }}><Clock size={12} /> {fmtTime(now)}</div>
           {staff && <div className="hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground border border-border rounded-lg px-3 py-1.5"><User size={12} /> {staff.name.split(" ")[0]}</div>}
@@ -3803,9 +3803,9 @@ export function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAd
                     })()}`}>
                       <div className="flex-1 min-w-0"><p className="text-xs font-medium truncate">{o.menuItem.name}</p><p className="text-[10px] text-muted-foreground tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies), configuredCurrency)} ea</p></div>
                       <div className="flex items-center gap-1 shrink-0">
-                        <button aria-label={`Remove one ${o.menuItem.name}`} onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded-md bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Minus size={9} /></button>
+                        <button aria-label={`Remove one ${o.menuItem.name}`} onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} disabled={!permissions.editOrders} className="w-6 h-6 rounded-md bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Minus size={10} /></button>
                         <span aria-label={`Quantity ${o.qty}`} className="text-xs font-bold w-4 text-center tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{o.qty}</span>
-                        <button aria-label={`Add one ${o.menuItem.name}`} onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders || (() => { const item = menu.find((menuItem) => menuItem.id === o.menuItem.id); return !item; })()} className="w-5 h-5 rounded-md bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
+                        <button aria-label={`Add one ${o.menuItem.name}`} onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders || (() => { const item = menu.find((menuItem) => menuItem.id === o.menuItem.id); return !item; })()} className="w-6 h-6 rounded-md bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={10} /></button>
                       </div>
                       <span className="text-xs font-semibold min-w-14 text-right shrink-0 tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies) * o.qty, configuredCurrency)}</span>
                     </div>

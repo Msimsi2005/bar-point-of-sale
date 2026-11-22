@@ -180,20 +180,14 @@
   }
 }
 
-.pos-shell button:focus-visible,
-.pos-shell input:focus-visible,
-.pos-shell select:focus-visible {
-  outline: 2px solid rgba(200, 130, 58, 0.45);
-  outline-offset: 1px;
-}
-
-.pos-toast {
+.pos-toast,
+[data-sonner-toast] {
   font-family: "Barlow", sans-serif;
-  border-radius: 0.5rem;
-  border: 1px solid rgba(200, 130, 58, 0.28);
-  background: #1e1a14;
-  color: #f0e6d3;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+  border-radius: 0.5rem !important;
+  border: 1px solid rgba(200, 130, 58, 0.28) !important;
+  background: #1e1a14 !important;
+  color: #f0e6d3 !important;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28) !important;
 }
 
 .pos-toast[data-type="success"] {
@@ -207,4 +201,60 @@
 table th,
 table td {
   vertical-align: middle;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(200, 130, 58, 0.35) transparent;
+}
+
+[style*="DM Mono"] {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid rgba(200, 130, 58, 0.5);
+  outline-offset: 2px;
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  transition: border-color 140ms ease;
+}
+
+input[type="date"],
+input[type="time"],
+input[type="number"] {
+  color-scheme: dark;
+}
+
+::placeholder {
+  color: rgba(138, 127, 110, 0.85);
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+.rounded-xl.border,
+.rounded-2xl.border {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+table {
+  border-collapse: collapse;
+}
+
+thead th {
+  font-weight: 600;
 }
