@@ -1493,10 +1493,11 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
   const hasChargeableTotal = config.allowZeroSales || total > 0 || !!selectedCustomerId;
   const hasValidModeAmount = isSettlement || isDeposit ? accountAmount > 0 : hasChargeableTotal;
   const methodAllowed = isOnAccount ? true : enabledMethods.length > 0;
-  const canCharge = methodAllowed && hasValidModeAmount && (!isOnAccount || hasLinkedCreditor) && (!isCash || isOnAccount || cashAmount >= saleAmount);
+  const needsCreditor = isOnAccount || isSettlement || isDeposit;
+  const canCharge = methodAllowed && hasValidModeAmount && (!needsCreditor || hasLinkedCreditor) && (!isCash || isOnAccount || cashAmount >= saleAmount);
 
   async function handleCharge() {
-    if (charging || (isOnAccount && !hasLinkedCreditor)) return;
+    if (charging || (needsCreditor && !hasLinkedCreditor)) return;
     const paymentLabel = isOnAccount
       ? "On Account"
       : enabledMethods.find((m) => m.id === method)?.name ?? method;
@@ -1577,13 +1578,13 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
               <div className="grid grid-cols-2 gap-1.5">
                 {[{ id: "purchase", label: "Purchase" }, { id: "on-account", label: "On Account" }, { id: "settlement", label: "Settlement" }, { id: "deposit", label: "Deposit Top-up" }].map((opt) => (
                   (() => {
-                    const isLocked = opt.id === "on-account" && !hasLinkedCreditor;
+                    const isLocked = opt.id !== "purchase" && !hasLinkedCreditor;
                     return (
                       <button
                         key={opt.id}
                         type="button"
                         disabled={isLocked}
-                        title={isLocked ? "Link a creditor first to allow on-account purchases." : undefined}
+                        title={isLocked ? "Link a creditor before using this account action." : undefined}
                         onClick={() => setAccountMode(opt.id as "purchase" | "on-account" | "settlement" | "deposit")}
                         className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all ${accountMode === opt.id ? "bg-primary text-primary-foreground" : "bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"} ${isLocked ? "opacity-40 cursor-not-allowed hover:bg-white/5 hover:text-muted-foreground" : ""}`}
                       >
@@ -1595,7 +1596,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
               </div>
               {!hasLinkedCreditor && (
                 <p className="mt-2 text-[10px] text-amber-300" style={{ fontFamily: "'DM Mono', monospace" }}>
-                  Link a creditor to enable on-account (negative) purchasing.
+                  Link a creditor before posting to an account, settling, or topping up.
                 </p>
               )}
               {!hasLinkedCreditor && tenant.customers.length > 0 && (

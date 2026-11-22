@@ -205,6 +205,19 @@ describe("PaymentModal", () => {
     randomUuid.mockRestore();
   });
 
+  it("keeps settlement and top-up closed until a creditor is linked", async () => {
+    const user = userEvent.setup();
+    render(<PaymentModal tab={tab as never} tenant={tenantWithCustomer as never} staffId="staff-1" onClose={() => {}} onComplete={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "Settlement" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Deposit Top-up" })).toBeDisabled();
+
+    await user.selectOptions(screen.getByLabelText("Link Creditor For This Checkout"), "customer-1");
+
+    expect(screen.getByRole("button", { name: "Settlement" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deposit Top-up" })).toBeEnabled();
+  });
+
   it("creates settlement transactions that reduce debt", async () => {
     const user = userEvent.setup();
     const onComplete = vi.fn();

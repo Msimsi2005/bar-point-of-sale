@@ -441,7 +441,7 @@ function splitVat(grossBase: number, config: any) {
   return { subtotal: gross, tax, total: roundMoney(gross + tax) };
 }
 
-const SERVER_CONFIG_KEYS = ["authVersion", "revokedJti", "processedSaleIds", "paused"];
+const SERVER_CONFIG_KEYS = ["authVersion", "revokedJti", "processedSaleIds", "paused", "staffSessionVersion"];
 
 function rolePermissions(role: string) {
   if (role === "owner") {
@@ -569,7 +569,7 @@ async function verifyTenantToken(token: string, email: string) {
     if (!payload?.email || !payload?.exp) return null;
     if (normalizeEmail(String(payload.email)) !== normalizeEmail(email)) return null;
     if (Math.floor(Date.now() / 1000) > Number(payload.exp)) return null;
-    return payload as { email: string; exp: number; staffId?: string; jti?: string; v?: number };
+    return payload as { email: string; exp: number; staffId?: string; jti?: string; v?: number; sv?: number };
   } catch {
     return null;
   }
@@ -635,6 +635,14 @@ app.use("/server/tenant/*", async (c, next) => {
   }
   if (Number(payload.v ?? -1) !== version) {
     return c.json({ error: "Session expired. Sign in again." }, 401);
+  }
+  if (payload.staffId) {
+    const staffVersions = tenant.config?.staffSessionVersion && typeof tenant.config.staffSessionVersion === "object"
+      ? tenant.config.staffSessionVersion
+      : {};
+    if (Number(payload.sv ?? 0) !== Number(staffVersions[payload.staffId] ?? 0)) {
+      return c.json({ error: "Session expired. Sign in again." }, 401);
+    }
   }
   if (!payload.jti || revoked.includes(payload.jti)) {
     return c.json({ error: "Session expired. Sign in again." }, 401);
@@ -1061,6 +1069,7 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
     staffId: member.id,
     jti: crypto.randomUUID(),
     v: Number(tenant.config?.authVersion ?? 0),
+    sv: Number(tenant.config?.staffSessionVersion?.[member.id] ?? 0),
   });
   return c.json({ staffToken, pinIsDefault: mustChange || member.pinMustChange === true, staff: publicStaff([member])[0] });
 });
@@ -1153,6 +1162,7 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
     }
   }
 
+  let pinStaffId = "";
   if (typeof body.pin === "string") {
     if (!/^\d{4}$/.test(body.pin)) return c.json({ error: "PIN must be exactly 4 digits" }, 400);
     if (body.pin === "1234") return c.json({ error: "Choose a PIN other than 1234" }, 400);
@@ -1162,14 +1172,24 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
     if (!staff.some((member: any) => member?.id === staffId)) return c.json({ error: "Staff member not found" }, 404);
     const actor = c.get("tenantAuth");
     if (staffId !== actor?.staffId && !permissions.manageStaff) return c.json({ error: "Not allowed" }, 403);
+    pinStaffId = staffId;
     updates.staff = staff.map((entry: any) => entry?.id === staffId ? { ...entry, pin: await hashPassword(body.pin), pinMustChange: false } : entry);
   }
 
   if (Object.keys(updates).length === 0) return c.json({ error: "No credential changes supplied" }, 400);
 
-  if (updates.password_hash || updates.email || updates.staff) {
+  if (updates.password_hash || updates.email) {
     const currentConfig = existing.config ?? {};
     updates.config = { ...currentConfig, ...(updates.config as object ?? {}), authVersion: Number(currentConfig.authVersion ?? 0) + 1 };
+  }
+
+  if (pinStaffId) {
+    const currentConfig = { ...(existing.config ?? {}), ...(updates.config as object ?? {}) };
+    const versions = {
+      ...(currentConfig.staffSessionVersion && typeof currentConfig.staffSessionVersion === "object" ? currentConfig.staffSessionVersion : {}),
+    };
+    versions[pinStaffId] = Number(versions[pinStaffId] ?? 0) + 1;
+    updates.config = { ...currentConfig, staffSessionVersion: versions };
   }
 
   const { data: updated, error: updateError } = await supabase
@@ -1187,8 +1207,12 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
   }
 
   const actor = c.get("tenantAuth");
+  const tokenStaffId = actor?.staffId ? String(actor.staffId) : "";
+  const staffVersions = updated.config?.staffSessionVersion && typeof updated.config.staffSessionVersion === "object"
+    ? updated.config.staffSessionVersion
+    : {};
   const tenantToken = await createTenantToken(nextEmail, {
-    ...(actor?.staffId ? { staffId: actor.staffId } : {}),
+    ...(tokenStaffId ? { staffId: tokenStaffId, sv: Number(staffVersions[tokenStaffId] ?? 0) } : {}),
     jti: crypto.randomUUID(),
     v: Number(updated.config?.authVersion ?? 0),
   });
