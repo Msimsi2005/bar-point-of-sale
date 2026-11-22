@@ -7,6 +7,9 @@ import {
 } from "../lib/api";
 import { API_BASE } from "../lib/supabase";
 import { businessDateKey, businessMonthKey, customerCreditDelta, fromBase, splitVat, toBase } from "../lib/money";
+import { cartAddedMessage } from "../lib/cartNotice";
+import { toast, Toaster } from "sonner";
+import "sonner/dist/styles.css";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "./components/ui/dialog";
@@ -1655,7 +1658,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
         </div>
         <div className="px-6 pb-6 pt-2 shrink-0">
           {chargeError && <p className="text-xs text-red-300">{chargeError}</p>}
-          <button onClick={handleCharge} disabled={!canCharge || charging} className="w-full rounded-xl bg-primary text-primary-foreground py-4 font-bold tracking-widest transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
+          <button onClick={handleCharge} disabled={!canCharge || charging} aria-busy={charging} className="w-full rounded-xl bg-primary text-primary-foreground py-4 font-bold tracking-widest transition-colors hover:opacity-90 active:opacity-80 disabled:opacity-30 disabled:cursor-not-allowed" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
             {isOnAccount
               ? `POST ${fmt(total, currency)} TO ACCOUNT`
               : isSettlement
@@ -3515,8 +3518,9 @@ function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; t
 
 let _tabSeq = 10;
 
-function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, onClient, onLogout }: { tenant: Tenant; staffId: string; onTenantChange: (t: Tenant) => void; onSalePersisted: (sale: SaleRecord, updated: Tenant) => void | Promise<void>; onAdmin: () => void; onClient: () => void; onLogout: () => void; }) {
+export function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, onClient, onLogout }: { tenant: Tenant; staffId: string; onTenantChange: (t: Tenant) => void; onSalePersisted: (sale: SaleRecord, updated: Tenant) => void | Promise<void>; onAdmin: () => void; onClient: () => void; onLogout: () => void; }) {
   const [tabs, setTabs] = useState<Tab[]>(() => hydrateTabs(tenant.config.posState?.tabs));
+  const tabsRef = useRef(tabs);
   const [activeTabId, setActiveTabId] = useState<string | null>(() => tenant.config.posState?.activeTabId ?? null);
   const [activeCategory, setActiveCategory] = useState("All");
   const [payingTab, setPayingTab] = useState<Tab | null>(null);
@@ -3534,6 +3538,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   useEffect(() => {
     const restoredTabs = hydrateTabs(tenant.config.posState?.tabs);
     const restoredActive = tenant.config.posState?.activeTabId ?? null;
+    tabsRef.current = restoredTabs;
     setTabs(restoredTabs);
     setActiveTabId(restoredActive && restoredTabs.some((tab) => tab.id === restoredActive) ? restoredActive : restoredTabs[0]?.id ?? null);
   }, [tenant.id]);
@@ -3583,48 +3588,77 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
     return item.stock - getReservedQty(item.id, tabsState);
   }
 
-  function addToOrder(item: MenuItem) {
-    if (!permissions.editOrders || !activeTabId) return;
-    setTabs((prev) => {
-      if (item.stock !== -1 && getRemainingStock(item, prev) <= 0) return prev;
-      return prev.map((tab) => {
+  function notifyAdded(name: string, qty: number) {
+    toast.success(cartAddedMessage(name, qty), { duration: 2500, className: "pos-toast" });
+  }
+
+  function notifyAddFailed(message: string) {
+    toast.error(message, { duration: 2500, className: "pos-toast" });
+  }
+
+  function addToOrder(item: MenuItem, qty = 1) {
+    if (!permissions.editOrders || qty < 1) return "blocked" as const;
+    if (!activeTabId) return "no-tab" as const;
+    const prev = tabsRef.current;
+    if (item.stock !== -1 && getRemainingStock(item, prev) < qty) return "stock" as const;
+    const next = prev.map((tab) => {
       if (tab.id !== activeTabId) return tab;
       const existing = tab.orders.find((o) => o.menuItem.id === item.id);
-      if (existing) return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === item.id ? { ...o, qty: o.qty + 1 } : o) };
-      return { ...tab, orders: [...tab.orders, { menuItem: item, qty: 1 }] };
-      });
+      if (existing) return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === item.id ? { ...o, qty: o.qty + qty } : o) };
+      return { ...tab, orders: [...tab.orders, { menuItem: item, qty }] };
     });
+    tabsRef.current = next;
+    setTabs(next);
+    notifyAdded(item.name, qty);
+    return "added" as const;
   }
 
   function applyScan() {
     const needle = scanValue.trim().toLowerCase();
     if (!needle) return;
-    const item = menu.find((entry) => entry.id.toLowerCase() === needle || entry.name.toLowerCase() === needle);
-    if (item) addToOrder(item);
     setScanValue("");
+    const item = menu.find((entry) => entry.id.toLowerCase() === needle || entry.name.toLowerCase() === needle);
+    if (!item) {
+      notifyAddFailed("No product matches that scan.");
+      return;
+    }
+    const result = addToOrder(item);
+    if (result === "no-tab") notifyAddFailed("Open a tab before adding a product.");
+    if (result === "stock") notifyAddFailed(`${item.name.trim() || "Product"} could not be added. Not enough stock.`);
   }
 
   function changeQty(tabId: string, itemId: string, delta: number) {
-    if (!permissions.editOrders) return;
-    setTabs((prev) => {
-      if (delta > 0) {
-        const item = menu.find((entry) => entry.id === itemId);
-        if (item && item.stock !== -1 && getRemainingStock(item, prev) <= 0) return prev;
+    if (!permissions.editOrders || delta === 0) return;
+    const prev = tabsRef.current;
+    const tab = prev.find((entry) => entry.id === tabId);
+    const line = tab?.orders.find((order) => order.menuItem.id === itemId);
+    if (delta > 0) {
+      const item = menu.find((entry) => entry.id === itemId);
+      if (!line || (item && item.stock !== -1 && getRemainingStock(item, prev) < delta)) {
+        notifyAddFailed(`${(line?.menuItem.name || item?.name || "Product").trim() || "Product"} could not be added. Not enough stock.`);
+        return;
       }
-      return prev.map((tab) => { if (tab.id !== tabId) return tab; return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === itemId ? { ...o, qty: o.qty + delta } : o).filter((o) => o.qty > 0) }; });
-    });
+    }
+    const next = prev.map((entry) => { if (entry.id !== tabId) return entry; return { ...entry, orders: entry.orders.map((o) => o.menuItem.id === itemId ? { ...o, qty: o.qty + delta } : o).filter((o) => o.qty > 0) }; });
+    tabsRef.current = next;
+    setTabs(next);
+    if (delta > 0 && line) notifyAdded(line.menuItem.name, delta);
   }
 
   function createTab(name: string, prepaid?: number, customerId?: string) {
     if (!permissions.openTabs) return;
     _tabSeq++;
     const t: Tab = { id: `t${_tabSeq}`, name, orders: [], opened: new Date(), prepaid, customerId };
-    setTabs((p) => [...p, t]); setActiveTabId(t.id); setShowNewTab(false);
+    const next = [...tabsRef.current, t];
+    tabsRef.current = next;
+    setTabs(next); setActiveTabId(t.id); setShowNewTab(false);
   }
 
   function closeTabById(id: string) {
     if (!permissions.openTabs) return;
-    setTabs((p) => p.filter((t) => t.id !== id));
+    const next = tabsRef.current.filter((t) => t.id !== id);
+    tabsRef.current = next;
+    setTabs(next);
     if (activeTabId === id) setActiveTabId(null);
   }
 
@@ -3665,7 +3699,8 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   const balance = prepaid > 0 ? prepaid - totalConverted : 0;
 
   return (
-    <div className="h-screen w-screen overflow-hidden flex flex-col bg-background text-foreground select-none" style={{ fontFamily: "'Barlow', sans-serif" }}>
+    <div className="pos-shell h-screen w-screen overflow-hidden flex flex-col bg-background text-foreground select-none" style={{ fontFamily: "'Barlow', sans-serif" }}>
+      <Toaster position="top-center" offset={12} duration={2500} visibleToasts={3} closeButton={false} style={{ zIndex: 30, pointerEvents: "none" }} toastOptions={{ duration: 2500, className: "pos-toast", style: { pointerEvents: "none" } }} />
       <header className="flex items-center justify-between px-5 py-3 border-b border-border bg-card/60 backdrop-blur-sm z-10 shrink-0">
         <div className="flex items-center gap-2.5">
           <TenantBrandMark businessInfo={tenant.businessInfo} size="sm" />
@@ -3699,8 +3734,8 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
         {/* Menu */}
         <main className="flex-1 flex flex-col overflow-hidden">
           <div className="flex items-center gap-1 px-4 pt-3 pb-2.5 border-b border-border shrink-0 overflow-x-auto">
-            <input aria-label="Scan product" value={scanValue} onChange={(e) => setScanValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") applyScan(); }} placeholder="Scan or type a product" className="mr-2 w-40 shrink-0 rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50" />
-            {enabledCats.map((cat) => <button key={cat} onClick={()=>setActiveCategory(cat)} className={`shrink-0 rounded-lg px-3.5 py-1.5 text-xs font-bold transition-all ${activeCategory===cat?"bg-primary text-primary-foreground":"text-muted-foreground hover:text-foreground hover:bg-white/5"}`} style={{ fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.04em" }}>{cat.toUpperCase()}</button>)}
+            <input aria-label="Scan product" value={scanValue} onChange={(e) => setScanValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyScan(); } }} placeholder="Scan or type a product" className="mr-2 h-8 w-44 shrink-0 rounded-lg bg-white/5 border border-border px-3 text-xs text-foreground placeholder:text-muted-foreground/80 focus:outline-none focus:border-primary/50" />
+            {enabledCats.map((cat) => <button key={cat} onClick={()=>setActiveCategory(cat)} className={`shrink-0 h-8 rounded-lg px-3.5 text-xs font-bold transition-colors ${activeCategory===cat?"bg-primary text-primary-foreground":"text-muted-foreground hover:text-foreground hover:bg-white/5"}`} style={{ fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.04em" }}>{cat.toUpperCase()}</button>)}
           </div>
           {!activeTabId && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/8 border border-primary/20 px-4 py-2 text-xs text-primary/80"><AlertCircle size={13} /> Select or open a tab to start ordering</div>}
           <div className="flex-1 overflow-y-auto px-4 pt-3 pb-4">
@@ -3712,8 +3747,8 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                 const oqty = activeTab?.orders.find((o) => o.menuItem.id === item.id)?.qty ?? 0;
                 const dis = !activeTabId || !permissions.editOrders || (item.stock !== -1 && remainingStock <= 0);
                 return (
-                  <button key={item.id} onClick={()=>!dis&&addToOrder(item)} disabled={dis}
-                    className={`group relative text-left rounded-xl border p-3.5 transition-all active:scale-[0.97] ${negativeSales ? "border-red-500/50 bg-red-950/25 ring-1 ring-red-500/40" : oos ? "border-amber-500/40 bg-amber-950/20 ring-1 ring-amber-500/30" : dis ? "border-border/50 bg-card/40 opacity-50 cursor-not-allowed" : "border-border bg-card hover:border-primary/30 hover:bg-primary/5 cursor-pointer"}`}>
+                  <button key={item.id} aria-label={`Add ${item.name}`} onClick={() => addToOrder(item)} disabled={dis}
+                    className={`group relative text-left rounded-xl border p-3 transition-colors active:bg-primary/10 ${negativeSales ? "border-red-500/50 bg-red-950/25 ring-1 ring-red-500/40" : oos ? "border-amber-500/40 bg-amber-950/20 ring-1 ring-amber-500/30" : dis ? "border-border/50 bg-card/40 opacity-50 cursor-not-allowed" : oqty > 0 ? "border-primary/40 bg-primary/5 hover:border-primary/50 cursor-pointer" : "border-border bg-card hover:border-primary/30 hover:bg-primary/5 cursor-pointer"}`}>
                     {item.popular&&!negativeSales&&!oos&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-primary/80 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>HOT</span>}
                     {negativeSales&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-red-300 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>NEGATIVE SALES</span>}
                     {oos&&!negativeSales&&<span className="absolute top-2.5 right-2.5 text-[9px] font-bold text-amber-300 uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>ZERO STOCK</span>}
@@ -3721,7 +3756,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                     <p className="text-sm font-semibold text-foreground pr-6 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "0.92rem" }}>{item.name}</p>
                     <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-1">{item.description}</p>
                     <div className="flex items-end justify-between mt-2">
-                      <p className="text-sm font-bold text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{(config.currencies.find((currency) => currency.code === (item.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? configuredCurrency.symbol)}{item.price.toFixed(2)}</p>
+                      <p className="text-sm font-bold text-primary tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{(config.currencies.find((currency) => currency.code === (item.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? configuredCurrency.symbol)}{item.price.toFixed(2)}</p>
                       {item.stock!==-1&&<p className={`text-[10px] ${negativeSales ? "text-red-300 font-semibold" : oos ? "text-amber-300 font-semibold" : "text-muted-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{negativeSales ? `${Math.abs(remainingStock)} below stock` : oos ? "0 left" : `${remainingStock} left`}</p>}
                     </div>
                     {negativeSales && (
@@ -3732,7 +3767,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                   </button>
                 );
               })}
-              {filtered.length === 0 && <div className="col-span-4 text-center py-16 text-muted-foreground"><Package size={28} className="mx-auto mb-2 opacity-20" /><p className="text-sm">No products in this category.</p></div>}
+              {filtered.length === 0 && <div className="col-span-full text-center py-16 text-muted-foreground"><Package size={28} className="mx-auto mb-2 opacity-20" /><p className="text-sm">No products in this category.</p></div>}
             </div>
           </div>
         </main>
@@ -3752,7 +3787,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                 </div>
               )}
               <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
-                {activeTab.orders.length === 0 ? <div className="text-center py-10"><ShoppingBag size={26} className="text-muted-foreground/25 mx-auto mb-2" /><p className="text-xs text-muted-foreground">No items yet.</p></div> :
+                {activeTab.orders.length === 0 ? <div className="text-center py-10"><ShoppingBag size={26} className="text-muted-foreground/25 mx-auto mb-2" /><p className="text-xs text-muted-foreground">No items yet. Tap a product to add it.</p></div> :
                   activeTab.orders.map((o) => (
                     <div key={o.menuItem.id} className={`flex items-center gap-2 rounded-lg px-3 py-2 ${(() => {
                       const tracked = menu.find((menuItem) => menuItem.id === o.menuItem.id);
@@ -3760,13 +3795,13 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                       const remaining = getRemainingStock(tracked, tabs);
                       return remaining < 0 ? "bg-red-950/20 border border-red-500/25" : "bg-white/3 border border-white/5";
                     })()}`}>
-                      <div className="flex-1 min-w-0"><p className="text-xs font-medium truncate">{o.menuItem.name}</p><p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies), configuredCurrency)} ea</p></div>
+                      <div className="flex-1 min-w-0"><p className="text-xs font-medium truncate">{o.menuItem.name}</p><p className="text-[10px] text-muted-foreground tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies), configuredCurrency)} ea</p></div>
                       <div className="flex items-center gap-1 shrink-0">
-                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Minus size={9} /></button>
-                        <span className="text-xs font-bold w-4 text-center" style={{ fontFamily: "'DM Mono', monospace" }}>{o.qty}</span>
-                        <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders || (() => { const item = menu.find((menuItem) => menuItem.id === o.menuItem.id); return !item; })()} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
+                        <button aria-label={`Remove one ${o.menuItem.name}`} onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded-md bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Minus size={9} /></button>
+                        <span aria-label={`Quantity ${o.qty}`} className="text-xs font-bold w-4 text-center tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{o.qty}</span>
+                        <button aria-label={`Add one ${o.menuItem.name}`} onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders || (() => { const item = menu.find((menuItem) => menuItem.id === o.menuItem.id); return !item; })()} className="w-5 h-5 rounded-md bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
                       </div>
-                      <span className="text-xs font-semibold w-12 text-right shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies) * o.qty, configuredCurrency)}</span>
+                      <span className="text-xs font-semibold min-w-14 text-right shrink-0 tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies) * o.qty, configuredCurrency)}</span>
                     </div>
                   ))}
               </div>
@@ -3780,9 +3815,9 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
               )}
               {activeTab.orders.length > 0 && (
                 <div className="px-3 py-2 border-t border-border space-y-0.5 shrink-0">
-                  <div className="flex justify-between text-xs text-muted-foreground px-1"><span>Subtotal</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(subtotal, configuredCurrency)}</span></div>
-                  {config.vatEnabled && <div className="flex justify-between text-xs text-muted-foreground px-1"><span>VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(tax, configuredCurrency)}</span></div>}
-                  <div className="flex justify-between text-sm font-bold px-1 pt-1 border-t border-border"><span>Total</span><span className="text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(total, configuredCurrency)}</span></div>
+                  <div className="flex justify-between text-xs text-muted-foreground px-1"><span>Subtotal</span><span className="tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(subtotal, configuredCurrency)}</span></div>
+                  {config.vatEnabled && <div className="flex justify-between text-xs text-muted-foreground px-1"><span>VAT ({config.vatRate}%)</span><span className="tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(tax, configuredCurrency)}</span></div>}
+                  <div className="flex justify-between text-sm font-bold px-1 pt-1 border-t border-border"><span>Total</span><span className="text-primary tabular-nums" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(total, configuredCurrency)}</span></div>
                 </div>
               )}
               <div className="px-3 pb-4 pt-2 shrink-0">

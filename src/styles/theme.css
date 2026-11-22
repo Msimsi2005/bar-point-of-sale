@@ -179,3 +179,32 @@
     line-height: 1.5;
   }
 }
+
+.pos-shell button:focus-visible,
+.pos-shell input:focus-visible,
+.pos-shell select:focus-visible {
+  outline: 2px solid rgba(200, 130, 58, 0.45);
+  outline-offset: 1px;
+}
+
+.pos-toast {
+  font-family: "Barlow", sans-serif;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(200, 130, 58, 0.28);
+  background: #1e1a14;
+  color: #f0e6d3;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+}
+
+.pos-toast[data-type="success"] {
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.pos-toast[data-type="error"] {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+table th,
+table td {
+  vertical-align: middle;
+}
