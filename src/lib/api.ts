@@ -10,8 +10,12 @@ async function call(path: string, method = "GET", body?: unknown, token?: string
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? "Request failed");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = new Error(data.error ?? "Request failed") as Error & { status?: number };
+    error.status = res.status;
+    throw error;
+  }
   return data;
 }
 
@@ -80,10 +84,15 @@ export async function apiAddSale(email: string, sale: object, tenantToken: strin
   return call(`/tenant/${encodeURIComponent(email)}/sale`, "POST", sale, tenantToken);
 }
 
+export async function apiStartStaffSession(email: string, staffId: string, pin: string, tenantToken: string) {
+  return call(`/tenant/${encodeURIComponent(email)}/staff/session`, "POST", { staffId, pin }, tenantToken);
+}
+
+export async function apiLogout(email: string, tenantToken: string) {
+  return call(`/tenant/${encodeURIComponent(email)}/logout`, "POST", {}, tenantToken);
+}
+
 export async function apiGetSales(email: string, tenantToken: string) {
   return call(`/tenant/${encodeURIComponent(email)}/sales`, "GET", undefined, tenantToken);
 }
 
-export async function apiExecuteSql(token: string, sql: string) {
-  return call("/sql", "POST", { sql }, undefined, { "X-Superadmin-Token": token });
-}

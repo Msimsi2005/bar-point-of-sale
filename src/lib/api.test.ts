@@ -8,7 +8,6 @@ import {
   apiAdminLogin, apiAdminListTenants, apiAdminCreateTenant,
   apiAdminUpdateTenant, apiAdminDeleteTenant,
   apiGetTenant, apiAddSale, apiUpdateTenantCredentials,
-  apiExecuteSql,
 } from "./api";
 import { makeTenantSavePatch } from "../app/App";
 
@@ -231,24 +230,6 @@ describe("api helpers – superadmin", () => {
         headers: expect.objectContaining({ "X-Superadmin-Token": "super-token" }),
       }),
     );
-  });
-
-  it("executes arbitrary SQL with superadmin header", async () => {
-    fetchMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({ rows: [] }),
-    });
-
-    const res = await apiExecuteSql("super-token", "SELECT * FROM tenants");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://api.example.test/functions/v1/server/sql",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({ "X-Superadmin-Token": "super-token" }),
-        body: JSON.stringify({ sql: "SELECT * FROM tenants" }),
-      }),
-    );
-    expect(res.rows).toEqual([]);
   });
 
   it("throws on non-ok responses", async () => {

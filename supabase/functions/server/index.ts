@@ -6,18 +6,21 @@ import { createClient as createSupabaseClient } from "jsr:@supabase/supabase-js@
 const app = new Hono();
 
 app.use("*", logger(console.log));
+const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((value) => value.trim()).filter(Boolean);
 app.use("/*", cors({
-  origin: "*",
+  origin: (origin) => {
+    if (!ALLOWED_ORIGINS.length) return "*";
+    return ALLOWED_ORIGINS.includes(origin) ? origin : "";
+  },
   allowHeaders: ["Content-Type", "Authorization", "X-Superadmin-Token", "X-Tenant-Token"],
   allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   exposeHeaders: ["Content-Length"],
   maxAge: 600,
 }));
 
-// ── Superadmin credentials (server-only) ────────────────────────────────────
-const DEFAULT_SUPERADMIN_PASSWORD = "mistyWHY2012";
-const SUPERADMIN_EMAIL = normalizeEmail(Deno.env.get("SUPERADMIN_EMAIL") ?? "msizimoyo24@gmail.com");
-const SUPERADMIN_PASSWORDS = (Deno.env.get("SUPERADMIN_PASSWORDS") ?? Deno.env.get("SUPERADMIN_PASSWORD") ?? DEFAULT_SUPERADMIN_PASSWORD)
+// ── Superadmin credentials (server-only, no source fallback) ────────────────
+const SUPERADMIN_EMAIL = normalizeEmail(Deno.env.get("SUPERADMIN_EMAIL") ?? "");
+const SUPERADMIN_PASSWORDS = (Deno.env.get("SUPERADMIN_PASSWORDS") ?? Deno.env.get("SUPERADMIN_PASSWORD") ?? "")
   .split(",")
   .map((value) => value.trim())
   .filter((value) => value.length > 0);
@@ -41,15 +44,19 @@ type AuthFailureBucket = { failures: number; lockedUntil: number };
 type AuthFailuresMap = Record<string, AuthFailureBucket>;
 const authFailures = new Map<string, AuthFailureBucket>();
 
+type AdminSession = { tokenHash: string; exp: number };
+
 type SecurityState = {
   rateBuckets: RateBucketsMap;
   authFailures: AuthFailuresMap;
+  adminSessions: AdminSession[];
 };
 
 function defaultSecurityState(): SecurityState {
   return {
     rateBuckets: {},
     authFailures: {},
+    adminSessions: [],
   };
 }
 
@@ -81,6 +88,16 @@ function sanitizeSecurityState(raw: any): SecurityState {
       if (lockedUntil > 0 && lockedUntil < now - maxAuthAgeMs) continue;
       if (failures <= 0 && lockedUntil <= 0) continue;
       state.authFailures[key] = { failures: Math.max(0, Math.trunc(failures)), lockedUntil: Math.max(0, Math.trunc(lockedUntil)) };
+    }
+  }
+
+  if (Array.isArray(raw.adminSessions)) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const session of raw.adminSessions) {
+      const tokenHash = String(session?.tokenHash ?? "");
+      const exp = Number(session?.exp ?? 0);
+      if (!/^[0-9a-f]{64}$/.test(tokenHash) || !Number.isFinite(exp) || exp <= nowSec) continue;
+      state.adminSessions.push({ tokenHash, exp });
     }
   }
 
@@ -161,11 +178,16 @@ async function saveSecurityStateRecord(supabase: any, config: any, state: Securi
     securityState: state,
   };
 
-  const { error } = await supabase
-    .from("tenants")
-    .update({ config: nextConfig })
-    .eq("email", SECURITY_STATE_EMAIL);
-  if (error) throw new Error(error.message);
+  let lastError = "Failed to save security state";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { error } = await supabase
+      .from("tenants")
+      .update({ config: nextConfig })
+      .eq("email", SECURITY_STATE_EMAIL);
+    if (!error) return;
+    lastError = error.message;
+  }
+  throw new Error(lastError);
 }
 
 function getClientIp(c: any): string {
@@ -302,12 +324,25 @@ app.use("/server/*", async (c, next) => {
   await next();
 });
 
-function isSuperAdmin(c: any): boolean {
+function readAdminToken(c: any): string {
   const custom = c.req.header("X-Superadmin-Token") ?? "";
-  if (custom && isValidSuperAdminPassword(custom)) return true;
+  if (custom) return custom;
   const auth = c.req.header("Authorization") ?? "";
-  const token = auth.replace("Bearer ", "");
-  return isValidSuperAdminPassword(token);
+  return auth.startsWith("Bearer ") ? auth.slice(7) : "";
+}
+
+async function isSuperAdmin(c: any): Promise<boolean> {
+  const token = readAdminToken(c);
+  if (!token) return false;
+  try {
+    const supabase = db();
+    const record = await loadSecurityStateRecord(supabase);
+    const tokenHash = await sha256Hex(token);
+    const nowSec = Math.floor(Date.now() / 1000);
+    return record.state.adminSessions.some((session) => session.tokenHash === tokenHash && session.exp > nowSec);
+  } catch {
+    return false;
+  }
 }
 
 function db() {
@@ -321,16 +356,151 @@ function db() {
 app.get("/server/health", (c) => c.json({ status: "ok" }));
 
 // ── SQL execution (superadmin only) ───────────────────────────────────────────
-app.post("/server/sql", async (c) => {
-  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
-
-  return c.json({ error: "SQL endpoint is disabled in this deployment." }, 501);
-});
+app.post("/server/sql", (c) => c.json({ error: "SQL endpoint is disabled." }, 410));
 
 // ── Password helper ─────────────────────────────────────────────────────────
-async function hashPassword(pw: string): Promise<string> {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pw));
+async function sha256Hex(value: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function bytesToB64(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function b64ToBytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function timingSafeEqual(a: Uint8Array, b: Uint8Array) {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) mismatch |= a[i] ^ b[i];
+  return mismatch === 0;
+}
+
+async function pbkdf2Bytes(password: string, salt: Uint8Array, iterations: number) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, 256);
+  return new Uint8Array(bits);
+}
+
+async function hashPassword(pw: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await pbkdf2Bytes(pw, salt, 120000);
+  return `pbkdf2$120000$${bytesToB64(salt)}$${bytesToB64(hash)}`;
+}
+
+async function verifyPassword(pw: string, stored: string): Promise<boolean> {
+  if (stored.startsWith("pbkdf2$")) {
+    const [, iterationsRaw, saltB64, hashB64] = stored.split("$");
+    const iterations = Number(iterationsRaw);
+    if (!iterations || !saltB64 || !hashB64) return false;
+    const actual = await pbkdf2Bytes(pw, b64ToBytes(saltB64), iterations);
+    return timingSafeEqual(actual, b64ToBytes(hashB64));
+  }
+  const legacy = await sha256Hex(pw);
+  const storedBytes = new TextEncoder().encode(legacy);
+  const givenBytes = new TextEncoder().encode(stored);
+  return timingSafeEqual(storedBytes, givenBytes);
+}
+
+function roundMoney(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function rateOf(currencies: any[] | undefined, code: string) {
+  const found = (currencies ?? []).find((currency) => currency?.code === code);
+  const rate = Number(found?.rate);
+  return Number.isFinite(rate) && rate > 0 ? rate : 1;
+}
+
+function toBase(amount: number, currencyCode: string | undefined, currencies: any[] | undefined) {
+  return amount / rateOf(currencies, currencyCode || "ZAR");
+}
+
+function fromBase(amount: number, currencyCode: string | undefined, currencies: any[] | undefined) {
+  return amount * rateOf(currencies, currencyCode || "ZAR");
+}
+
+function splitVat(grossBase: number, config: any) {
+  const gross = roundMoney(grossBase);
+  if (!config?.vatEnabled) return { subtotal: gross, tax: 0, total: gross };
+  const rate = Number(config.vatRate) || 0;
+  if (config.vatPricesIncludeVat) {
+    const tax = roundMoney(gross * rate / (100 + rate));
+    return { subtotal: roundMoney(gross - tax), tax, total: gross };
+  }
+  const tax = roundMoney(gross * rate / 100);
+  return { subtotal: gross, tax, total: roundMoney(gross + tax) };
+}
+
+const SERVER_CONFIG_KEYS = ["authVersion", "revokedJti", "processedSaleIds", "paused"];
+
+function rolePermissions(role: string) {
+  if (role === "owner") {
+    return { adminAccess: true, editProducts: true, editCategories: true, editPayments: true, editCurrencies: true, editVat: true, editBusiness: true, manageStaff: true, manageCustomers: true, viewSales: true, manageSystem: true, openTabs: true, editOrders: true, chargeTabs: true, useClientDisplay: true };
+  }
+  if (role === "manager") {
+    return { adminAccess: false, editProducts: true, editCategories: true, editPayments: false, editCurrencies: false, editVat: false, editBusiness: false, manageStaff: false, manageCustomers: true, viewSales: true, manageSystem: false, openTabs: true, editOrders: true, chargeTabs: true, useClientDisplay: true };
+  }
+  return { adminAccess: false, editProducts: false, editCategories: false, editPayments: false, editCurrencies: false, editVat: false, editBusiness: false, manageStaff: false, manageCustomers: false, viewSales: false, manageSystem: false, openTabs: true, editOrders: true, chargeTabs: true, useClientDisplay: true };
+}
+
+function permissionsOf(member: any) {
+  const defaults = rolePermissions(member?.role === "owner" || member?.role === "manager" ? member.role : "bartender");
+  const raw = member?.permissions && typeof member.permissions === "object" ? member.permissions : {};
+  const next: Record<string, boolean> = {};
+  for (const key of Object.keys(defaults)) next[key] = typeof raw[key] === "boolean" ? raw[key] : defaults[key as keyof typeof defaults];
+  return next;
+}
+
+function publicStaff(staff: any[]) {
+  return (staff ?? []).map((member) => {
+    const { pin: _pin, ...rest } = member ?? {};
+    return { ...rest, hasPin: Boolean(member?.pin) };
+  });
+}
+
+function mergeStaffPins(existing: any[], incoming: any[]) {
+  const previous = new Map((existing ?? []).map((member) => [member?.id, member]));
+  return (incoming ?? []).map((member) => {
+    const prior = previous.get(member?.id);
+    const incomingPin = typeof member?.pin === "string" ? member.pin : "";
+    const pin = incomingPin || prior?.pin || "";
+    return { ...member, pin };
+  });
+}
+
+function mergeConfig(existing: any, incoming: any, permissions: Record<string, boolean>) {
+  const next = { ...(existing ?? {}) };
+  if ((permissions.openTabs || permissions.editOrders || permissions.chargeTabs || permissions.useClientDisplay) && incoming?.posState) {
+    next.posState = incoming.posState;
+  }
+  if (permissions.editProducts && incoming?.stockMovements) next.stockMovements = incoming.stockMovements;
+  if (permissions.editVat) {
+    if (typeof incoming?.vatEnabled === "boolean") next.vatEnabled = incoming.vatEnabled;
+    if (typeof incoming?.vatRate === "number") next.vatRate = incoming.vatRate;
+    if (typeof incoming?.vatPricesIncludeVat === "boolean") next.vatPricesIncludeVat = incoming.vatPricesIncludeVat;
+  }
+  if (permissions.editPayments && incoming?.paymentMethods) next.paymentMethods = incoming.paymentMethods;
+  if (permissions.editCurrencies) {
+    if (incoming?.currencies) next.currencies = incoming.currencies;
+    if (typeof incoming?.defaultCurrencyCode === "string") next.defaultCurrencyCode = incoming.defaultCurrencyCode;
+  }
+  if (permissions.editCategories && incoming?.categories) next.categories = incoming.categories;
+  if (permissions.manageSystem || permissions.editBusiness) {
+    for (const key of ["printers", "scanners", "defaultPrinterId", "defaultScannerId", "receiptTemplate", "allowZeroSales", "allowCredits"]) {
+      if (incoming?.[key] !== undefined) next[key] = incoming[key];
+    }
+  }
+  for (const key of SERVER_CONFIG_KEYS) next[key] = existing?.[key];
+  return next;
 }
 
 function normalizeEmail(email: string) {
@@ -348,7 +518,8 @@ function base64UrlDecode(value: string) {
 }
 
 async function signTokenPayload(payloadB64: string) {
-  const secret = Deno.env.get("TENANT_TOKEN_SECRET") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "fallback-tenant-secret";
+  const secret = Deno.env.get("TENANT_TOKEN_SECRET") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!secret) throw new Error("TENANT_TOKEN_SECRET must be configured");
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -361,10 +532,11 @@ async function signTokenPayload(payloadB64: string) {
   return base64UrlEncode(bytes);
 }
 
-async function createTenantToken(email: string) {
+async function createTenantToken(email: string, extra: Record<string, unknown> = {}) {
   const payload = JSON.stringify({
     email,
-    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7),
+    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 12),
+    ...extra,
   });
   const payloadB64 = base64UrlEncode(payload);
   const sig = await signTokenPayload(payloadB64);
@@ -373,19 +545,19 @@ async function createTenantToken(email: string) {
 
 async function verifyTenantToken(token: string, email: string) {
   const parts = token.split(".");
-  if (parts.length !== 2) return false;
+  if (parts.length !== 2) return null;
   const [payloadB64, sig] = parts;
   const expectedSig = await signTokenPayload(payloadB64);
-  if (expectedSig !== sig) return false;
+  if (expectedSig !== sig) return null;
 
   try {
     const payload = JSON.parse(base64UrlDecode(payloadB64));
-    if (!payload?.email || !payload?.exp) return false;
-    if (normalizeEmail(String(payload.email)) !== normalizeEmail(email)) return false;
-    if (Math.floor(Date.now() / 1000) > Number(payload.exp)) return false;
-    return true;
+    if (!payload?.email || !payload?.exp) return null;
+    if (normalizeEmail(String(payload.email)) !== normalizeEmail(email)) return null;
+    if (Math.floor(Date.now() / 1000) > Number(payload.exp)) return null;
+    return payload as { email: string; exp: number; staffId?: string; jti?: string; v?: number };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -412,8 +584,9 @@ function toTenantResponse(row: any, sales: any[], tenantToken?: string) {
     config: row.config ?? defaultConfig(),
     menu: row.menu ?? [],
     customers: row.customers ?? [],
-    staff: row.staff ?? [],
+    staff: publicStaff(row.staff ?? []),
     createdAt: row.created_at ?? new Date().toISOString(),
+    updatedAt: row.updated_at ?? null,
     sales,
   };
 }
@@ -425,12 +598,32 @@ app.use("/server/tenant/*", async (c, next) => {
   const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   const headerToken = c.req.header("X-Tenant-Token") ?? "";
   const token = headerToken || bearer;
-  const allowed = token ? await verifyTenantToken(token, email) : false;
+  const payload = token ? await verifyTenantToken(token, email) : null;
 
-  if (!allowed) {
+  if (!payload) {
     auditEvent(c, "tenant.auth", "denied", { email });
     return c.json({ error: "Unauthorized tenant access" }, 401);
   }
+
+  const supabase = db();
+  const { data: tenant, error } = await supabase
+    .from("tenants")
+    .select("config")
+    .eq("email", email)
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 400);
+  if (!tenant) return c.json({ error: "Not found" }, 404);
+
+  const version = Number(tenant.config?.authVersion ?? 0);
+  const revoked = Array.isArray(tenant.config?.revokedJti) ? tenant.config.revokedJti : [];
+  if (payload.staffId && Number(payload.v ?? 0) !== version) {
+    return c.json({ error: "Session expired. Sign in again." }, 401);
+  }
+  if (payload.jti && revoked.includes(payload.jti)) {
+    return c.json({ error: "Session expired. Sign in again." }, 401);
+  }
+
+  c.set("tenantAuth", payload);
   await next();
 });
 
@@ -467,6 +660,10 @@ app.post("/server/admin/login", async (c) => {
     return c.json({ error: "Account temporarily locked due to repeated failures." }, 429);
   }
 
+  if (!SUPERADMIN_EMAIL || SUPERADMIN_PASSWORDS.length === 0) {
+    return c.json({ error: "Superadmin is not configured" }, 503);
+  }
+
   if (normalizedEmail !== SUPERADMIN_EMAIL || !isValidSuperAdminPassword(String(password ?? ""))) {
     const failure = recordAuthFailure(authKey, securityRecord.state);
     try {
@@ -483,19 +680,24 @@ app.post("/server/admin/login", async (c) => {
   }
 
   clearAuthFailures(authKey, securityRecord.state);
+  const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, "");
+  const nowSec = Math.floor(Date.now() / 1000);
+  securityRecord.state.adminSessions = [
+    ...securityRecord.state.adminSessions.filter((session) => session.exp > nowSec),
+    { tokenHash: await sha256Hex(token), exp: nowSec + (60 * 60 * 12) },
+  ].slice(-20);
   try {
     await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
   auditEvent(c, "admin.login", "ok", { email: normalizedEmail });
-  // Return the password that was validated as the bearer token (server re-verifies per request).
-  return c.json({ token: String(password) });
+  return c.json({ token });
 });
 
 // ── SUPERADMIN: list all tenants ─────────────────────────────────────────────
 app.get("/server/admin/tenants", async (c) => {
-  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
+  if (!(await isSuperAdmin(c))) return c.json({ error: "Unauthorized" }, 401);
   const supabase = db();
   const { data, error } = await supabase
     .from("tenants")
@@ -508,7 +710,7 @@ app.get("/server/admin/tenants", async (c) => {
 
 // ── SUPERADMIN: register a company ───────────────────────────────────────────
 app.post("/server/admin/tenants", async (c) => {
-  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
+  if (!(await isSuperAdmin(c))) return c.json({ error: "Unauthorized" }, 401);
   const { email, password, businessName } = await c.req.json();
   if (!email || !password || !businessName) return c.json({ error: "Missing fields" }, 400);
 
@@ -536,7 +738,7 @@ app.post("/server/admin/tenants", async (c) => {
     config: defaultConfig(),
     menu: [],
     customers: [],
-    staff: [{ id: staffOwnerId, name: businessName, pin: "1234", role: "owner" }],
+    staff: [{ id: staffOwnerId, name: businessName, pin: await hashPassword("1234"), role: "owner", pinMustChange: true }],
   };
 
   const { data: created, error: createError } = await supabase
@@ -551,7 +753,7 @@ app.post("/server/admin/tenants", async (c) => {
 
 // ── SUPERADMIN: update tenant (reset password) ───────────────────────────────
 app.patch("/server/admin/tenants/:email", async (c) => {
-  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
+  if (!(await isSuperAdmin(c))) return c.json({ error: "Unauthorized" }, 401);
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
 
@@ -578,7 +780,7 @@ app.patch("/server/admin/tenants/:email", async (c) => {
   if (typeof body.paused === "boolean") {
     try {
       const currentConfig = await ensureExistingConfig();
-      updates.config = { ...currentConfig, paused: body.paused };
+      updates.config = { ...currentConfig, paused: body.paused, authVersion: Number(currentConfig?.authVersion ?? 0) + 1 };
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Failed to load tenant config" }, 400);
     }
@@ -626,7 +828,7 @@ app.patch("/server/admin/tenants/:email", async (c) => {
 
 // ── SUPERADMIN: delete a company ─────────────────────────────────────────────
 app.delete("/server/admin/tenants/:email", async (c) => {
-  if (!isSuperAdmin(c)) return c.json({ error: "Unauthorized" }, 401);
+  if (!(await isSuperAdmin(c))) return c.json({ error: "Unauthorized" }, 401);
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
   const { error } = await supabase.from("tenants").delete().eq("email", email);
@@ -672,7 +874,7 @@ app.post("/server/auth/login", async (c) => {
 
   const { data: tenant, error } = await supabase
     .from("tenants")
-    .select("id, email, password_hash, business_info, config, menu, customers, staff, created_at")
+    .select("id, email, password_hash, business_info, config, menu, customers, staff, created_at, updated_at")
     .eq("email", normalizedEmail)
     .maybeSingle();
   if (error) return c.json({ error: error.message }, 400);
@@ -692,8 +894,12 @@ app.post("/server/auth/login", async (c) => {
     return c.json({ error: "This business is paused. Contact superadmin." }, 403);
   }
 
-  const hash = await hashPassword(password);
-  if (hash !== tenant.password_hash) {
+  const passwordOk = await verifyPassword(String(password), String(tenant.password_hash ?? ""));
+  if (passwordOk && !String(tenant.password_hash ?? "").startsWith("pbkdf2$")) {
+    await supabase.from("tenants").update({ password_hash: await hashPassword(String(password)) }).eq("email", normalizedEmail);
+  }
+
+  if (!passwordOk) {
     const failure = recordAuthFailure(authKey, securityRecord.state);
     try {
       await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
@@ -731,7 +937,7 @@ app.get("/server/tenant/:email", async (c) => {
   const supabase = db();
   const { data: tenant, error } = await supabase
     .from("tenants")
-    .select("id, email, business_info, config, menu, customers, staff, created_at")
+    .select("id, email, business_info, config, menu, customers, staff, created_at, updated_at")
     .eq("email", email)
     .maybeSingle();
   if (error) return c.json({ error: error.message }, 400);
@@ -749,34 +955,91 @@ app.get("/server/tenant/:email", async (c) => {
   return c.json(toTenantResponse(tenant, sales));
 });
 
+async function loadTenant(supabase: any, email: string) {
+  const { data, error } = await supabase
+    .from("tenants")
+    .select("id, email, business_info, config, menu, customers, staff, created_at, updated_at")
+    .eq("email", email)
+    .maybeSingle();
+  return { data, error };
+}
+
+function requireStaff(c: any, tenant: any) {
+  const auth = c.get("tenantAuth");
+  if (!auth?.staffId) return null;
+  const member = (tenant.staff ?? []).find((staff: any) => staff?.id === auth.staffId);
+  return member ?? null;
+}
+
+// ── VENUE: staff PIN session ─────────────────────────────────────────────────
+app.post("/server/tenant/:email/staff/session", async (c) => {
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const auth = c.get("tenantAuth");
+  if (auth?.staffId) return c.json({ error: "Use the venue login before choosing staff" }, 400);
+  const { staffId, pin } = await c.req.json();
+  const supabase = db();
+  const { data: tenant, error } = await loadTenant(supabase, email);
+  if (error) return c.json({ error: error.message }, 400);
+  if (!tenant) return c.json({ error: "Not found" }, 404);
+  const member = (tenant.staff ?? []).find((staff: any) => staff?.id === staffId);
+  const supplied = String(pin ?? "");
+  if (!member || !(await verifyPassword(supplied, String(member.pin ?? "")))) {
+    return c.json({ error: "Wrong PIN" }, 401);
+  }
+  if (!String(member.pin ?? "").startsWith("pbkdf2$")) {
+    const staff = (tenant.staff ?? []).map((staff: any) => staff?.id === member.id ? { ...staff, pin: await hashPassword(supplied), pinMustChange: supplied === "1234" } : staff);
+    await supabase.from("tenants").update({ staff }).eq("email", email);
+  }
+  const staffToken = await createTenantToken(email, {
+    staffId: member.id,
+    jti: crypto.randomUUID(),
+    v: Number(tenant.config?.authVersion ?? 0),
+  });
+  return c.json({ staffToken, pinIsDefault: supplied === "1234", staff: publicStaff([member])[0] });
+});
+
+app.post("/server/tenant/:email/logout", async (c) => {
+  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
+  const auth = c.get("tenantAuth");
+  if (!auth?.jti) return c.json({ ok: true });
+  const supabase = db();
+  const { data: tenant, error } = await loadTenant(supabase, email);
+  if (error) return c.json({ error: error.message }, 400);
+  if (!tenant) return c.json({ ok: true });
+  const revoked = Array.isArray(tenant.config?.revokedJti) ? tenant.config.revokedJti : [];
+  const next = [...revoked, auth.jti].slice(-200);
+  const { error: updateError } = await supabase.from("tenants").update({ config: { ...tenant.config, revokedJti: next } }).eq("email", email);
+  if (updateError) return c.json({ error: updateError.message }, 400);
+  return c.json({ ok: true });
+});
+
 // ── VENUE: save tenant ────────────────────────────────────────────────────────
 app.put("/server/tenant/:email", async (c) => {
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
-  const { data: existing, error: existingError } = await supabase
-    .from("tenants")
-    .select("id, email")
-    .eq("email", email)
-    .maybeSingle();
+  const { data: existing, error: existingError } = await loadTenant(supabase, email);
   if (existingError) return c.json({ error: existingError.message }, 400);
   if (!existing) return c.json({ error: "Not found" }, 404);
+  const member = requireStaff(c, existing);
+  if (!member) return c.json({ error: "Staff sign-in required" }, 403);
+  const permissions = permissionsOf(member);
 
   const body = await c.req.json();
-
   const patch: any = {};
-  if (body.businessInfo !== undefined) patch.business_info = body.businessInfo;
-  if (body.config !== undefined) patch.config = body.config;
-  if (body.menu !== undefined) patch.menu = body.menu;
-  if (body.customers !== undefined) patch.customers = body.customers;
-  if (body.staff !== undefined) patch.staff = body.staff;
+  if (body.businessInfo !== undefined && permissions.editBusiness) patch.business_info = body.businessInfo;
+  if (body.menu !== undefined && permissions.editProducts) patch.menu = body.menu;
+  if (body.customers !== undefined && permissions.manageCustomers) patch.customers = body.customers;
+  if (body.staff !== undefined && permissions.manageStaff) patch.staff = mergeStaffPins(existing.staff ?? [], body.staff);
+  if (body.config !== undefined) patch.config = mergeConfig(existing.config ?? {}, body.config, permissions);
+  if (Object.keys(patch).length === 0) return c.json(toTenantResponse(existing, []));
 
-  const { data: updated, error: updateError } = await supabase
-    .from("tenants")
-    .update(patch)
-    .eq("email", email)
-    .select("id, email, business_info, config, menu, customers, staff, created_at")
-    .single();
+  let query = supabase.from("tenants").update(patch).eq("email", email);
+  if (body.updatedAt) query = query.eq("updated_at", body.updatedAt);
+  const { data: updated, error: updateError } = await query
+    .select("id, email, business_info, config, menu, customers, staff, created_at, updated_at")
+    .maybeSingle();
   if (updateError) return c.json({ error: updateError.message }, 400);
+  if (!updated) return c.json({ error: "Save conflict. Reload the latest data." }, 409);
 
   return c.json(toTenantResponse(updated, []));
 });
@@ -784,17 +1047,20 @@ app.put("/server/tenant/:email", async (c) => {
 app.patch("/server/tenant/:email/credentials", async (c) => {
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
   const supabase = db();
-  const { data: existing, error: existingError } = await supabase
-    .from("tenants")
-    .select("id, email, business_info, config, menu, customers, staff, created_at")
-    .eq("email", email)
-    .maybeSingle();
+  const { data: existing, error: existingError } = await loadTenant(supabase, email);
   if (existingError) return c.json({ error: existingError.message }, 400);
   if (!existing) return c.json({ error: "Not found" }, 404);
+  const member = requireStaff(c, existing);
+  if (!member) return c.json({ error: "Staff sign-in required" }, 403);
+  const permissions = permissionsOf(member);
 
   const body = await c.req.json();
   const updates: Record<string, unknown> = {};
   let nextEmail = email;
+
+  if ((typeof body.loginEmail === "string" || (typeof body.password === "string" && body.password.trim().length > 0)) && !permissions.manageSystem) {
+    return c.json({ error: "Not allowed" }, 403);
+  }
 
   if (typeof body.loginEmail === "string") {
     const normalizedLoginEmail = normalizeEmail(body.loginEmail);
@@ -826,105 +1092,199 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
     if (!staffId) return c.json({ error: "Staff ID is required to update PIN" }, 400);
     const staff = Array.isArray(existing.staff) ? existing.staff : [];
     if (!staff.some((member: any) => member?.id === staffId)) return c.json({ error: "Staff member not found" }, 404);
-    updates.staff = staff.map((member: any) => member?.id === staffId ? { ...member, pin: body.pin } : member);
+    const actor = c.get("tenantAuth");
+    if (staffId !== actor?.staffId && !permissions.manageStaff) return c.json({ error: "Not allowed" }, 403);
+    updates.staff = staff.map((entry: any) => entry?.id === staffId ? { ...entry, pin: await hashPassword(body.pin), pinMustChange: false } : entry);
   }
 
   if (Object.keys(updates).length === 0) return c.json({ error: "No credential changes supplied" }, 400);
+
+  if (updates.password_hash || updates.email) {
+    const currentConfig = existing.config ?? {};
+    updates.config = { ...currentConfig, ...(updates.config as object ?? {}), authVersion: Number(currentConfig.authVersion ?? 0) + 1 };
+  }
 
   const { data: updated, error: updateError } = await supabase
     .from("tenants")
     .update(updates)
     .eq("email", email)
-    .select("id, email, business_info, config, menu, customers, staff, created_at")
+    .select("id, email, business_info, config, menu, customers, staff, created_at, updated_at")
     .single();
-  if (updateError) return c.json({ error: updateError.message }, 400);
+  if (updateError) {
+    const message = String(updateError.message ?? "");
+    if (/foreign key|violates/i.test(message) && updates.email) {
+      return c.json({ error: "Email change is blocked until sales follow the new login email. Run src/lib/003_sales_email_on_update_cascade.sql, then try again." }, 409);
+    }
+    return c.json({ error: message }, 400);
+  }
 
-  const tenantToken = await createTenantToken(nextEmail);
+  const actor = c.get("tenantAuth");
+  const tenantToken = await createTenantToken(nextEmail, actor?.staffId ? {
+    staffId: actor.staffId,
+    jti: crypto.randomUUID(),
+    v: Number(updated.config?.authVersion ?? 0),
+  } : {});
   return c.json(toTenantResponse(updated, [], tenantToken));
 });
+
+function creditDelta(action: string | undefined, baseTotal: number, accountAmountBase: number) {
+  if (action === "on-account") return -roundMoney(baseTotal);
+  if (action === "settlement" || action === "deposit") return roundMoney(accountAmountBase);
+  return 0;
+}
+
+async function insertSaleRow(supabase: any, row: Record<string, unknown>, sale: any) {
+  const { error: baseError } = await supabase.from("sales").insert(row);
+  if (!baseError) return { ok: true as const };
+  const msg = String(baseError.message ?? "");
+  if (/duplicate key|already exists/i.test(msg)) return { ok: true as const, duplicate: true };
+  const lower = msg.toLowerCase();
+  const isLegacyNotNull = lower.includes("violates not-null constraint") || lower.includes("null value in column");
+  if (!isLegacyNotNull) return { ok: false as const, error: msg };
+
+  const legacyInsert: Record<string, unknown> = {
+    ...row,
+    tab_name: sale?.tabName ?? "Walk-in",
+    items: sale?.items ?? [],
+    subtotal: Number(sale?.subtotal ?? 0),
+    tax: Number(sale?.tax ?? 0),
+    total: Number(sale?.total ?? 0),
+    total_converted: Number(sale?.totalConverted ?? sale?.total ?? 0),
+    payment_method: sale?.paymentMethod ?? "Unknown",
+    currency_code: sale?.currencyCode ?? "ZAR",
+    currency_symbol: sale?.currencySymbol ?? "R",
+    staff_id: sale?.staffId ?? null,
+    customer_id: sale?.customerId ?? null,
+    prepaid: sale?.prepaid ?? null,
+    change_amount: sale?.change ?? null,
+    timestamp: sale?.timestamp ?? new Date().toISOString(),
+    saved_at: new Date().toISOString(),
+  };
+  let legacyErrorMessage = "";
+  for (let i = 0; i < 16; i++) {
+    const { error: legacyError } = await supabase.from("sales").insert(legacyInsert);
+    if (!legacyError) return { ok: true as const };
+    legacyErrorMessage = String(legacyError.message ?? "Unknown legacy insert error");
+    if (/duplicate key|already exists/i.test(legacyErrorMessage)) return { ok: true as const, duplicate: true };
+    const missingCol = /Could not find the '([^']+)' column/.exec(legacyErrorMessage);
+    if (missingCol?.[1]) {
+      delete legacyInsert[missingCol[1]];
+      continue;
+    }
+    break;
+  }
+  return { ok: false as const, error: `Sale save failed. ${msg}. Legacy retry: ${legacyErrorMessage}` };
+}
 
 // ── VENUE: add sale ───────────────────────────────────────────────────────────
 app.post("/server/tenant/:email/sale", async (c) => {
   const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
-  const sale = await c.req.json();
+  const incoming = await c.req.json();
   const supabase = db();
+  const saleId = String(incoming?.id ?? "");
+  if (!/^[0-9a-f-]{16,}$/i.test(saleId)) return c.json({ error: "Sale id is required" }, 400);
 
-  const baseInsert = {
-    id: crypto.randomUUID(),
-    tenant_email: email,
-    sale,
-  };
+  const { data: existingSale, error: existingSaleError } = await supabase.from("sales").select("id").eq("id", saleId).maybeSingle();
+  if (existingSaleError) return c.json({ error: existingSaleError.message }, 400);
 
-  const { error: baseError } = await supabase.from("sales").insert(baseInsert);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { data: tenant, error } = await loadTenant(supabase, email);
+    if (error) return c.json({ error: error.message }, 400);
+    if (!tenant) return c.json({ error: "Not found" }, 404);
+    const member = requireStaff(c, tenant);
+    if (!member) return c.json({ error: "Staff sign-in required" }, 403);
+    if (!permissionsOf(member).chargeTabs) return c.json({ error: "Not allowed" }, 403);
 
-  if (baseError) {
-    const msg = String(baseError.message ?? "").toLowerCase();
-    const isLegacyNotNull = msg.includes("violates not-null constraint") || msg.includes("null value in column");
-
-    if (!isLegacyNotNull) {
-      return c.json({ error: baseError.message }, 400);
+    if (existingSale) {
+      return c.json({ ok: true, duplicate: true, menu: tenant.menu ?? [], customers: tenant.customers ?? [], config: tenant.config ?? {}, updatedAt: tenant.updated_at ?? null });
     }
 
-    // Legacy compatibility path: older sales schemas may still enforce NOT NULL on denormalized columns.
-    const legacyInsert: Record<string, unknown> = {
-      ...baseInsert,
-      tab_name: sale?.tabName ?? "Walk-in",
-      items: sale?.items ?? [],
-      subtotal: Number(sale?.subtotal ?? 0),
-      tax: Number(sale?.tax ?? 0),
-      total: Number(sale?.total ?? 0),
-      total_converted: Number(sale?.totalConverted ?? sale?.total ?? 0),
-      payment_method: sale?.paymentMethod ?? "Unknown",
-      currency_code: sale?.currencyCode ?? "ZAR",
-      currency_symbol: sale?.currencySymbol ?? "R",
-      staff_id: sale?.staffId ?? null,
-      customer_id: sale?.customerId ?? null,
-      prepaid: sale?.prepaid ?? null,
-      change_amount: sale?.change ?? null,
-      timestamp: sale?.timestamp ?? new Date().toISOString(),
-      saved_at: new Date().toISOString(),
+    const config = tenant.config ?? {};
+    const currencies = config.currencies ?? [];
+    const accountAction = incoming.accountAction;
+    const lines = accountAction === "settlement" || accountAction === "deposit"
+      ? []
+      : (Array.isArray(incoming.items) ? incoming.items : []);
+    const menu = JSON.parse(JSON.stringify(tenant.menu ?? []));
+    const priced: any[] = [];
+    let grossBase = 0;
+    for (const line of lines) {
+      const qty = Math.trunc(Number(line?.qty ?? 0));
+      if (qty < 1) return c.json({ error: "Quantity must be at least 1" }, 400);
+      const product = menu.find((item: any) => item?.id === line?.menuItemId);
+      if (!product) return c.json({ error: "Unknown product" }, 400);
+      const stock = Number(product.stock);
+      const tracked = Number.isFinite(stock) && stock !== -1;
+      if (tracked && stock < qty) return c.json({ error: `${product.name} does not have enough stock` }, 409);
+      const baseUnit = toBase(Number(product.price) || 0, product.currencyCode, currencies);
+      grossBase += baseUnit * qty;
+      priced.push({
+        menuItem: { id: product.id, name: product.name, price: Number(product.price) || 0, currencyCode: product.currencyCode || "ZAR", basePrice: roundMoney(baseUnit) },
+        qty,
+      });
+      if (tracked) product.stock = stock - qty;
+    }
+
+    const tenderCode = String(incoming.currencyCode || config.defaultCurrencyCode || "ZAR");
+    const parts = splitVat(grossBase, config);
+    const accountAmountBase = toBase(Number(incoming.accountAmount ?? 0) || 0, tenderCode, currencies);
+    const delta = creditDelta(accountAction, parts.total, accountAmountBase);
+    const customers = JSON.parse(JSON.stringify(tenant.customers ?? []));
+    const movesSpend = !accountAction || accountAction === "purchase" || accountAction === "on-account";
+    if (incoming.customerId && (delta !== 0 || movesSpend)) {
+      const customer = customers.find((entry: any) => entry?.id === incoming.customerId);
+      if (!customer) return c.json({ error: "Customer not found" }, 400);
+      if (delta !== 0) {
+        const currentCredit = Number(customer.creditBalance ?? customer.credit ?? 0);
+        customer.creditBalance = roundMoney(currentCredit + delta);
+      }
+      if (movesSpend) {
+        customer.totalSpent = roundMoney(Number(customer.totalSpent ?? 0) + parts.total);
+        customer.visits = Number(customer.visits ?? 0) + 1;
+      }
+    }
+
+    const rate = rateOf(currencies, tenderCode);
+    const sale = {
+      ...incoming,
+      id: saleId,
+      items: priced,
+      subtotal: parts.subtotal,
+      tax: parts.tax,
+      total: parts.total,
+      totalConverted: roundMoney(fromBase(parts.total, tenderCode, currencies)),
+      rateSnapshot: rate,
+      staffId: member.id,
+      timestamp: incoming.timestamp ?? new Date().toISOString(),
     };
 
-    let legacyErrorMessage = "";
-    let legacySaved = false;
-
-    for (let i = 0; i < 16; i++) {
-      const { error: legacyError } = await supabase.from("sales").insert(legacyInsert);
-      if (!legacyError) {
-        legacySaved = true;
-        break;
-      }
-
-      legacyErrorMessage = String(legacyError.message ?? "Unknown legacy insert error");
-      const missingCol = /Could not find the '([^']+)' column/.exec(legacyErrorMessage);
-      if (missingCol?.[1]) {
-        delete legacyInsert[missingCol[1]];
-        continue;
-      }
-
-      break;
+    const saved = await insertSaleRow(supabase, { id: saleId, tenant_email: email, sale }, sale);
+    if (!saved.ok) return c.json({ error: saved.error }, 400);
+    if (saved.duplicate) {
+      return c.json({ ok: true, duplicate: true, menu: tenant.menu ?? [], customers: tenant.customers ?? [], config, updatedAt: tenant.updated_at ?? null });
     }
 
-    if (!legacySaved) {
-      return c.json({ error: `Sale save failed. ${baseError.message}. Legacy retry: ${legacyErrorMessage}` }, 400);
+    const processed = Array.isArray(config.processedSaleIds) ? config.processedSaleIds : [];
+    const nextConfig = { ...config, processedSaleIds: [...processed, saleId].slice(-200) };
+    const { data: updated, error: updateError } = await supabase
+      .from("tenants")
+      .update({ menu, customers, config: nextConfig })
+      .eq("email", email)
+      .eq("updated_at", tenant.updated_at)
+      .select("updated_at")
+      .maybeSingle();
+    if (updateError) {
+      await supabase.from("sales").delete().eq("id", saleId);
+      return c.json({ error: updateError.message }, 400);
     }
+    if (!updated) {
+      await supabase.from("sales").delete().eq("id", saleId);
+      if (attempt < 2) continue;
+      return c.json({ error: "Sale conflict. Retry the charge." }, 409);
+    }
+    return c.json({ ok: true, sale, menu, customers, config: nextConfig, updatedAt: updated.updated_at });
   }
-
-  // Keep only the latest 500 sales per tenant.
-  const { data: toTrim, error: trimReadError } = await supabase
-    .from("sales")
-    .select("id")
-    .eq("tenant_email", email)
-    .order("saved_at", { ascending: false })
-    .range(500, 2000);
-  if (trimReadError) return c.json({ error: trimReadError.message }, 400);
-  const staleIds = (toTrim ?? []).map((row: any) => row.id);
-  if (staleIds.length) {
-    const { error: trimError } = await supabase.from("sales").delete().in("id", staleIds);
-    if (trimError) return c.json({ error: trimError.message }, 400);
-  }
-
-  return c.json({ ok: true });
+  return c.json({ error: "Sale conflict. Retry the charge." }, 409);
 });
 
 // ── VENUE: get sales ──────────────────────────────────────────────────────────
@@ -941,66 +1301,8 @@ app.get("/server/tenant/:email/sales", async (c) => {
   return c.json((data ?? []).map((row: any) => ({ ...(row.sale ?? {}), savedAt: row.saved_at })));
 });
 
-// ── VENUE: cleanup test sales (guarded) ─────────────────────────────────────
-app.post("/server/tenant/:email/sales/cleanup", async (c) => {
-  const email = normalizeEmail(decodeURIComponent(c.req.param("email")));
-  const supabase = db();
-
-  const body = await c.req.json().catch(() => ({}));
-  const confirm = String(body?.confirm ?? "");
-  const tabName = String(body?.tabName ?? "").trim();
-  const matchMode = body?.matchMode === "prefix" ? "prefix" : "exact";
-  const requestedMaxDelete = Number(body?.maxDelete ?? 5);
-  const maxDelete = Number.isFinite(requestedMaxDelete)
-    ? Math.min(Math.max(Math.trunc(requestedMaxDelete), 1), 20)
-    : 5;
-
-  if (confirm !== "DELETE_TEST_SALES") {
-    return c.json({ error: "Cleanup requires explicit confirmation token." }, 400);
-  }
-
-  if (!tabName) {
-    return c.json({ error: "tabName is required." }, 400);
-  }
-
-  // Guardrail: this endpoint is only for removing test rows, not production sales.
-  if (!/(test|sync|qa)/i.test(tabName)) {
-    return c.json({ error: "tabName must clearly identify test data (test/sync/qa)." }, 400);
-  }
-
-  const { data, error } = await supabase
-    .from("sales")
-    .select("id, sale, saved_at")
-    .eq("tenant_email", email)
-    .order("saved_at", { ascending: false })
-    .limit(500);
-
-  if (error) return c.json({ error: error.message }, 400);
-
-  const candidates = (data ?? []).filter((row: any) => {
-    const currentTabName = String(row?.sale?.tabName ?? "");
-    return matchMode === "prefix"
-      ? currentTabName.startsWith(tabName)
-      : currentTabName === tabName;
-  });
-
-  const toDelete = candidates.slice(0, maxDelete);
-  const ids = toDelete.map((row: any) => row.id).filter(Boolean);
-
-  if (!ids.length) {
-    return c.json({ ok: true, deletedCount: 0, matchedCount: candidates.length });
-  }
-
-  const { error: deleteError } = await supabase.from("sales").delete().in("id", ids);
-  if (deleteError) return c.json({ error: deleteError.message }, 400);
-
-  return c.json({
-    ok: true,
-    deletedCount: ids.length,
-    matchedCount: candidates.length,
-    deletedIds: ids,
-  });
-});
+// ── VENUE: cleanup is disabled so sales history cannot be deleted from the till
+app.post("/server/tenant/:email/sales/cleanup", (c) => c.json({ error: "Sales cleanup is disabled." }, 410));
 
 // ── Default config ────────────────────────────────────────────────────────────
 function defaultConfig() {

@@ -700,9 +700,14 @@ describe("SalesSection", () => {
     render(<SalesSection sales={sales} currency={tenant.config.currencies[0] as never} />);
 
     await user.click(screen.getByRole("button", { name: "Preset Last 7 Days" }));
-    expect(screen.getByText("2 transactions", { exact: false })).toBeInTheDocument();
+    const last7Start = new Date(now.getTime() - (6 * dayMs));
+    last7Start.setHours(0, 0, 0, 0);
+    const last7Count = [thisWeekMid, previousWeekMid].filter((stamp) => stamp >= last7Start).length;
+    expect(screen.getByText(`${last7Count} transactions`, { exact: false })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Table 1 Cash/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Table 2 Card/i })).toBeInTheDocument();
+    if (previousWeekMid >= last7Start) {
+      expect(screen.getByRole("button", { name: /Table 2 Card/i })).toBeInTheDocument();
+    }
 
     await user.click(screen.getByRole("button", { name: "Preset This Week" }));
     expect(screen.getByText("1 transactions", { exact: false })).toBeInTheDocument();

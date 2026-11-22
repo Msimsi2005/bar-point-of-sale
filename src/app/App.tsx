@@ -2,9 +2,11 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   apiLogin, apiSaveTenant, apiAddSale, apiUpdateTenantCredentials,
   apiAdminLogin, apiAdminListTenants, apiAdminCreateTenant,
-  apiAdminUpdateTenant, apiAdminDeleteTenant, apiExecuteSql,
+  apiAdminUpdateTenant, apiAdminDeleteTenant, apiGetTenant,
+  apiStartStaffSession, apiLogout,
 } from "../lib/api";
-import { API_BASE, SUPABASE_ANON_KEY } from "../lib/supabase";
+import { API_BASE } from "../lib/supabase";
+import { businessDateKey, businessMonthKey, customerCreditDelta, fromBase, splitVat, toBase } from "../lib/money";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "./components/ui/dialog";
@@ -63,7 +65,7 @@ interface StaffPermissions {
   useClientDisplay: boolean;
 }
 
-interface StaffMember { id: string; name: string; pin: string; role: "owner" | "manager" | "bartender"; permissions: StaffPermissions; }
+interface StaffMember { id: string; name: string; pin?: string; pinMustChange?: boolean; role: "owner" | "manager" | "bartender"; permissions: StaffPermissions; }
 interface Customer { id: string; name: string; email: string; phone: string; totalSpent: number; visits: number; notes: string; creditBalance?: number; creditAllowed?: boolean; }
 interface CategoryConfig { name: string; enabled: boolean; }
 interface Currency { code: string; symbol: string; name: string; rate: number; enabled: boolean; }
@@ -112,6 +114,7 @@ interface TenantConfig {
   allowCredits: boolean;
   vatEnabled: boolean;
   vatRate: number;
+  vatPricesIncludeVat?: boolean;
   printers: HardwareDevice[];
   scanners: HardwareDevice[];
   defaultPrinterId?: string;
@@ -129,6 +132,7 @@ interface MenuItem {
   id: string; name: string; category: string; price: number;
   description: string; stock: number; cost?: number; popular?: boolean;
   currencyCode?: string;
+  basePrice?: number;
 }
 
 interface OrderItem { menuItem: MenuItem; qty: number; }
@@ -146,6 +150,8 @@ interface SaleRecord {
   prepaid?: number; change?: number; cashTendered?: number;
   accountAction?: "purchase" | "on-account" | "settlement" | "deposit";
   accountAmount?: number;
+  rateSnapshot?: number;
+  soldPastZero?: boolean;
 }
 
 interface StockMovementLine {
@@ -183,6 +189,7 @@ interface Tenant {
   menu: MenuItem[]; sales: SaleRecord[];
   customers: Customer[]; staff: StaffMember[];
   createdAt: Date;
+  updatedAt?: string;
 }
 
 interface Session { tenantId: string; staffId: string; }
@@ -217,8 +224,10 @@ const CHANGELOG = [
 
 function fmtTime(d: Date) { return d.toLocaleTimeString("en-ZA", { hour: "2-digit", minute: "2-digit", hour12: true }); }
 function fmtDate(d: Date) { return d.toLocaleDateString("en-ZA", { day: "2-digit", month: "short", year: "numeric" }); }
-function dateKey(d: Date) { return d.toISOString().slice(0, 10); }
-function calcSubtotal(orders: OrderItem[]) { return orders.reduce((s, o) => s + o.menuItem.price * o.qty, 0); }
+function dateKey(d: Date) { return businessDateKey(d); }
+function calcSubtotal(orders: OrderItem[], currencies?: Currency[]) {
+  return orders.reduce((sum, order) => sum + toBase(order.menuItem.price, order.menuItem.currencyCode, currencies) * order.qty, 0);
+}
 function elapsed(d: Date) {
   const m = Math.floor((Date.now() - d.getTime()) / 60000);
   if (m < 1) return "now"; if (m < 60) return `${m}m`; return `${Math.floor(m / 60)}h ${m % 60}m`;
@@ -238,9 +247,8 @@ function defaultCurrency(config: Pick<TenantConfig, "currencies" | "defaultCurre
   const enabled = currencies.find((c) => c.enabled);
   return enabled ?? currencies[0] ?? fallback;
 }
-let _seq = 300;
-function uid() { return `id_${++_seq}`; }
-function calcTax(sub: number, cfg: TenantConfig) { return cfg.vatEnabled ? sub * (cfg.vatRate / 100) : 0; }
+function uid() { return crypto.randomUUID(); }
+function calcTax(sub: number, cfg: TenantConfig) { return splitVat(sub, cfg).tax; }
 function defaultReceiptTemplate(): ReceiptTemplate {
   return {
     headerLine1: "",
@@ -314,13 +322,22 @@ function asBool(value: unknown, fallback = false) {
 }
 
 export function makeTenantSavePatch(snapshot: Tenant) {
-  return {
+  const patch: {
+    businessInfo: BusinessInfo;
+    config: TenantConfig;
+    menu: MenuItem[];
+    staff: StaffMember[];
+    customers: Customer[];
+    updatedAt?: string;
+  } = {
     businessInfo: snapshot.businessInfo,
     config: snapshot.config,
     menu: snapshot.menu,
     staff: snapshot.staff,
     customers: snapshot.customers,
   };
+  if (snapshot.updatedAt) patch.updatedAt = snapshot.updatedAt;
+  return patch;
 }
 
 function defaultPermissionsForRole(role: StaffMember["role"]): StaffPermissions {
@@ -486,6 +503,7 @@ function rowToTenant(row: any): Tenant {
     },
     allowZeroSales: asBool(mergedConfig.allowZeroSales, false),
     allowCredits: asBool(mergedConfig.allowCredits, true),
+    vatPricesIncludeVat: asBool(mergedConfig.vatPricesIncludeVat, false),
     currencies: [...normalizedCurrencies, ...missingCurrencies],
     paymentMethods: mergedConfig.paymentMethods.map((m) => ({
       ...m,
@@ -581,12 +599,14 @@ function rowToTenant(row: any): Tenant {
       return {
         id: s.id,
         name: s.name,
-        pin: s.pin,
+        pin: typeof s.pin === "string" ? s.pin : undefined,
+        pinMustChange: Boolean(s.pinMustChange),
         role,
         permissions: normalizePermissions(s.permissions, role),
       };
     }),
     createdAt: new Date(row.createdAt ?? row.created_at ?? Date.now()),
+    updatedAt: row.updatedAt ?? row.updated_at ?? undefined,
   };
 }
 
@@ -597,7 +617,7 @@ function rowToTenant(row: any): Tenant {
 
 function makeConfig(overrides: Partial<TenantConfig> = {}): TenantConfig {
   return {
-    defaultCurrencyCode: "ZAR", allowZeroSales: false, allowCredits: true, vatEnabled: true, vatRate: 15,
+    defaultCurrencyCode: "ZAR", allowZeroSales: false, allowCredits: true, vatEnabled: true, vatRate: 15, vatPricesIncludeVat: false,
     currencies: [
       { code: "ZAR", symbol: "R", name: "South African Rand", rate: 1, enabled: true },
       { code: "USD", symbol: "$", name: "US Dollar", rate: 0.054, enabled: true },
@@ -803,9 +823,6 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
   const [editPw, setEditPw] = useState(""); const [editLoading, setEditLoading] = useState(false);
   const [receiptDrafts, setReceiptDrafts] = useState<Record<string, ReceiptTemplate>>({});
   const [receiptSavingEmail, setReceiptSavingEmail] = useState<string | null>(null);
-  const [sqlText, setSqlText] = useState("SELECT email, name, createdAt FROM tenants LIMIT 25;");
-  const [sqlResult, setSqlResult] = useState<any | null>(null);
-  const [sqlError, setSqlError] = useState(""); const [sqlLoading, setSqlLoading] = useState(false);
 
   useEffect(() => {
     loadTenants();
@@ -901,19 +918,6 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
       alert(e instanceof Error ? e.message : "Failed to save receipt template");
     } finally {
       setReceiptSavingEmail(null);
-    }
-  }
-
-  async function runSql() {
-    if (!sqlText.trim()) { setSqlError("Enter a SQL query."); return; }
-    setSqlLoading(true); setSqlError(""); setSqlResult(null);
-    try {
-      const data = await apiExecuteSql(token, sqlText);
-      setSqlResult(data);
-    } catch (e: unknown) {
-      setSqlError(e instanceof Error ? e.message : "SQL execution failed");
-    } finally {
-      setSqlLoading(false);
     }
   }
 
@@ -1109,56 +1113,6 @@ function SuperAdminDashboard({ token, onBack }: { token: string; onBack: () => v
           )}
         </div>
 
-        <div className="rounded-2xl border border-border bg-card/30 p-6 mt-8">
-          <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-            <div>
-              <h2 className="text-lg font-bold" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>SQL Editor</h2>
-              <p className="text-sm text-muted-foreground">Run SQL against your Supabase database from the superadmin portal.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button onClick={runSql} disabled={sqlLoading} className="rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-semibold hover:opacity-90 disabled:opacity-50">{sqlLoading ? "Running…" : "Execute SQL"}</button>
-              <button onClick={() => { setSqlText(""); setSqlResult(null); setSqlError(""); }} className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground">Clear</button>
-            </div>
-          </div>
-
-          <textarea value={sqlText} onChange={(e) => setSqlText(e.target.value)} rows={8} className="w-full rounded-2xl bg-[#121212] border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50 font-mono" placeholder="SELECT * FROM my_table WHERE ..." />
-
-          {sqlError && <div className="mt-4 rounded-lg border border-red-700/30 bg-red-900/10 px-4 py-3 text-sm text-red-300">{sqlError}</div>}
-
-          {sqlResult && (
-            <div className="mt-4 rounded-2xl border border-border bg-background/60 p-4">
-              <p className="text-xs text-muted-foreground uppercase tracking-widest mb-3" style={{ fontFamily: "'DM Mono', monospace" }}>Result</p>
-              {Array.isArray(sqlResult.result) ? (
-                sqlResult.result.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No rows returned.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full border-separate border-spacing-0 text-sm">
-                      <thead>
-                        <tr className="bg-white/5">
-                          {Object.keys(sqlResult.result[0]).map((key) => (
-                            <th key={key} className="border-b border-border px-3 py-2 text-left text-xs uppercase tracking-widest text-muted-foreground">{key}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sqlResult.result.map((row: any, rowIndex: number) => (
-                          <tr key={rowIndex} className={rowIndex % 2 === 0 ? "bg-white/5" : "bg-transparent"}>
-                            {Object.values(row).map((value, colIndex) => (
-                              <td key={colIndex} className="border-b border-border px-3 py-2 align-top text-xs text-foreground font-mono">{typeof value === "object" ? JSON.stringify(value) : String(value)}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )
-              ) : (
-                <pre className="whitespace-pre-wrap break-words text-xs text-foreground font-mono">{JSON.stringify(sqlResult, null, 2)}</pre>
-              )}
-            </div>
-          )}
-        </div>
       </div>
     </div>
   );
@@ -1222,14 +1176,28 @@ export function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant, tenantTok
 // STAFF PIN SELECTOR
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect: (staffId: string) => void; onBack: () => void; }) {
+export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect: (staffId: string, staffToken?: string) => void; onBack: () => void; }) {
   const [selected, setSelected] = useState<StaffMember | null>(null);
   const [pin, setPin] = useState(""); const [error, setError] = useState(false);
 
-  function tryPin(p: string) {
+  function failPin() {
+    setError(true); setPin(""); setTimeout(() => setError(false), 1200);
+  }
+
+  async function tryPin(p: string) {
     if (!selected) return;
-    if (selected.pin === p) { onSelect(selected.id); }
-    else { setError(true); setPin(""); setTimeout(() => setError(false), 1200); }
+    if (typeof selected.pin === "string") {
+      if (selected.pin === p) onSelect(selected.id);
+      else failPin();
+      return;
+    }
+    try {
+      const result = await apiStartStaffSession(tenant.email, selected.id, p, tenant.tenantToken ?? "");
+      if (result.pinIsDefault) window.alert("PIN 1234 is still the default. Change it in Admin before the next shift.");
+      onSelect(selected.id, result.staffToken);
+    } catch {
+      failPin();
+    }
   }
 
   function pressDigit(d: string) {
@@ -1247,6 +1215,7 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
           <div className="w-14 h-14 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center mx-auto mb-3"><span className="text-primary text-xl font-bold">{selected.name[0]}</span></div>
           <p className="text-lg font-bold mb-1">{selected.name}</p>
           <p className="text-xs text-muted-foreground mb-6 capitalize">{selected.role}</p>
+          {selected.pinMustChange && <p className="text-xs text-amber-300 mb-4">This PIN is still the default. Change it after you sign in.</p>}
           <div className={`flex justify-center gap-3 mb-6 ${error ? "animate-pulse" : ""}`}>
             {[0,1,2,3].map((i) => <div key={i} className={`w-4 h-4 rounded-full transition-all ${i < pin.length ? error ? "bg-red-500" : "bg-primary" : "bg-white/15"}`} />)}
           </div>
@@ -1292,23 +1261,19 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
 function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers, defaultPrinterId, onClose }: { sale: SaleRecord; businessInfo: BusinessInfo; receiptTemplate: ReceiptTemplate; staffName: string; printers: HardwareDevice[]; defaultPrinterId?: string; onClose: () => void; }) {
   const printRef = useRef<HTMLDivElement>(null);
   const [printError, setPrintError] = useState("");
+  const printer = printers.find((device) => device.id === defaultPrinterId && device.enabled);
+  const fx = sale.total > 0 ? sale.totalConverted / sale.total : (sale.rateSnapshot ?? 1);
+  const tenderText = (base: number) => `${sale.currencySymbol}${(base * fx).toFixed(2)}`;
 
   function handlePrint() {
     setPrintError("");
-    const w = window.open("", "_blank", "width=420,height=640");
-    if (!w) {
-      setPrintError("Popup blocked. Allow popups for this site and try again.");
-      return;
-    }
-
     const logo = receiptTemplate.showLogo && businessInfo.logo
       ? `<img src="${businessInfo.logo}" style="height:40px;display:block;margin:0 auto 8px;" />`
       : "";
-
     const printHtml = `
       <html>
         <head>
-          <title>Receipt</title>
+          <title>Receipt${printer ? ` - ${printer.name}` : ""}</title>
           <style>
             @page { size: 80mm auto; margin: 6mm; }
             html, body { margin: 0; padding: 0; }
@@ -1322,14 +1287,45 @@ function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers
             .bold { font-weight: bold; }
             .item { margin-bottom: 6px; }
             .desc { font-size: 9px; color: #777; margin: 1px 0 2px; }
-            @media print {
-              body { width: auto; padding: 0; }
-            }
+            @media print { body { width: auto; padding: 0; } }
           </style>
         </head>
         <body>${logo}${printRef.current?.innerHTML ?? ""}</body>
       </html>
     `;
+
+    if (printer) {
+      const iframe = document.createElement("iframe");
+      iframe.setAttribute("aria-hidden", "true");
+      iframe.style.position = "fixed";
+      iframe.style.width = "0";
+      iframe.style.height = "0";
+      iframe.style.border = "0";
+      document.body.appendChild(iframe);
+      const frameDoc = iframe.contentDocument;
+      if (frameDoc) {
+        frameDoc.open();
+        frameDoc.write(printHtml);
+        frameDoc.close();
+        setTimeout(() => {
+          try {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+          } catch {
+            setPrintError("Unable to open print dialog. Please print from your browser manually.");
+          }
+          setTimeout(() => iframe.remove(), 1000);
+        }, 120);
+        return;
+      }
+      iframe.remove();
+    }
+
+    const w = window.open("", "_blank", "width=420,height=640");
+    if (!w) {
+      setPrintError("Popup blocked. Allow popups for this site and try again.");
+      return;
+    }
 
     w.document.write(printHtml);
     w.document.close();
@@ -1365,16 +1361,19 @@ function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers
             <p className="c s">{fmtDate(sale.timestamp)} · {fmtTime(sale.timestamp)}</p>
             {receiptTemplate.showTabName && <p className="c s">Tab: {sale.tabName}</p>}
             <div className="line" />
-            {sale.items.map((o, i) => (
+            {sale.items.map((o, i) => {
+              const base = o.menuItem.basePrice ?? o.menuItem.price;
+              return (
               <div key={i} className="item">
-                <div className="row"><span className="bold">{o.menuItem.name}</span><span>{sale.currencySymbol}{o.menuItem.price.toFixed(2)}</span></div>
+                <div className="row"><span className="bold">{o.menuItem.name}</span><span>{tenderText(base * o.qty)}</span></div>
                 {o.menuItem.description && <p className="desc">{o.menuItem.description}</p>}
-                {o.qty > 1 && <div className="row"><span className="s">{o.qty} × {sale.currencySymbol}{o.menuItem.price.toFixed(2)}</span><span>{sale.currencySymbol}{(o.menuItem.price * o.qty).toFixed(2)}</span></div>}
+                {o.qty > 1 && <div className="row"><span className="s">{o.qty} × {tenderText(base)}</span><span>{tenderText(base * o.qty)}</span></div>}
               </div>
-            ))}
+              );
+            })}
             <div className="line" />
-            <div className="row"><span>Subtotal</span><span>{sale.currencySymbol}{sale.subtotal.toFixed(2)}</span></div>
-            {sale.tax > 0 && <div className="row"><span>VAT</span><span>{sale.currencySymbol}{sale.tax.toFixed(2)}</span></div>}
+            <div className="row"><span>Subtotal</span><span>{tenderText(sale.subtotal)}</span></div>
+            {sale.tax > 0 && <div className="row"><span>VAT</span><span>{tenderText(sale.tax)}</span></div>}
             <div className="line" />
             <div className="row bold"><span>TOTAL</span><span>{sale.currencySymbol}{sale.totalConverted.toFixed(2)}</span></div>
             {sale.prepaid && <><div className="row"><span>Prepaid</span><span>{sale.currencySymbol}{sale.prepaid.toFixed(2)}</span></div></>}
@@ -1389,7 +1388,7 @@ function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers
           {printError && <p className="mt-3 text-xs text-amber-300">{printError}</p>}
         </div>
         <div className="px-5 pb-5 pt-3 border-t border-amber-900/20 flex gap-2 shrink-0">
-          <button onClick={handlePrint} className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-primary text-primary-foreground py-3 text-sm font-bold hover:opacity-90" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}><Printer size={14} /> PRINT RECEIPT</button>
+          <button onClick={handlePrint} className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-primary text-primary-foreground py-3 text-sm font-bold hover:opacity-90" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}><Printer size={14} /> {printer ? `PRINT ${printer.name}` : "PRINT RECEIPT"}</button>
           <button onClick={onClose} className="flex-1 rounded-xl border border-border text-muted-foreground py-3 text-sm hover:text-foreground hover:bg-white/5 transition-colors">Skip</button>
         </div>
       </div>
@@ -1401,7 +1400,7 @@ function ReceiptModal({ sale, businessInfo, receiptTemplate, staffName, printers
 // PAYMENT MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab; tenant: Tenant; staffId: string; onClose: () => void; onComplete: (s: SaleRecord) => void; }) {
+export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { tab: Tab; tenant: Tenant; staffId: string; onClose: () => void; onComplete: (s: SaleRecord) => void | Promise<void>; }) {
   const { config } = tenant;
   const enabledMethods = config.paymentMethods.filter((m) => m.enabled);
   const [method, setMethod] = useState(enabledMethods[0]?.id ?? "");
@@ -1409,6 +1408,8 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
   const [accountMode, setAccountMode] = useState<"purchase" | "on-account" | "settlement" | "deposit">("purchase");
   const [accountAmountInput, setAccountAmountInput] = useState("");
   const [selectedCustomerId, setSelectedCustomerId] = useState(tab.customerId ?? "");
+  const [charging, setCharging] = useState(false);
+  const [chargeError, setChargeError] = useState("");
   const accountAmountInputId = "payment-account-amount";
   const cashTenderedInputId = "payment-cash-tendered";
   const checkoutCreditorId = "checkout-creditor-select";
@@ -1424,10 +1425,11 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
   }, [enabledMethods, method]);
 
   const currency = defaultCurrency(config);
-  const subtotal = calcSubtotal(tab.orders);
-  const tax = calcTax(subtotal, config);
-  const total = subtotal + tax;
-  const totalConverted = total * currency.rate;
+  const parts = splitVat(calcSubtotal(tab.orders, config.currencies), config);
+  const subtotal = parts.subtotal;
+  const tax = parts.tax;
+  const total = parts.total;
+  const totalConverted = fromBase(total, currency.code, config.currencies);
   const customer = tenant.customers.find((c) => c.id === selectedCustomerId) ?? null;
   const accountAmount = Math.max(0, parseFloat(accountAmountInput) || 0);
   const cashAmount = parseFloat(cashInput) || 0;
@@ -1443,8 +1445,8 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
   const methodAllowed = isOnAccount ? true : enabledMethods.length > 0;
   const canCharge = methodAllowed && hasValidModeAmount && (!isOnAccount || hasLinkedCreditor) && (!isCash || isOnAccount || cashAmount >= saleAmount);
 
-  function handleCharge() {
-    if (isOnAccount && !hasLinkedCreditor) return;
+  async function handleCharge() {
+    if (charging || (isOnAccount && !hasLinkedCreditor)) return;
     const paymentLabel = isOnAccount
       ? "On Account"
       : enabledMethods.find((m) => m.id === method)?.name ?? method;
@@ -1458,7 +1460,13 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
     const sale: SaleRecord = {
       id: crypto.randomUUID(),
       tabName: tab.name,
-      items: isSettlement || isDeposit ? [] : tab.orders,
+      items: isSettlement || isDeposit ? [] : tab.orders.map((order) => ({
+        ...order,
+        menuItem: {
+          ...order.menuItem,
+          basePrice: roundMoney(toBase(order.menuItem.price, order.menuItem.currencyCode, config.currencies)),
+        },
+      })),
       subtotal: isSettlement || isDeposit ? 0 : subtotal,
       tax: isSettlement || isDeposit ? 0 : tax,
       total: isSettlement || isDeposit ? 0 : total,
@@ -1470,8 +1478,16 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
       cashTendered: isCash && cashAmount > 0 ? cashAmount : undefined,
       accountAction,
       accountAmount: saleAmount,
+      rateSnapshot: currency.rate,
     };
-    onComplete(sale);
+    setCharging(true);
+    setChargeError("");
+    try {
+      await onComplete(sale);
+    } catch (error: unknown) {
+      setChargeError(error instanceof Error ? error.message : "The sale was not saved.");
+      setCharging(false);
+    }
   }
 
   return (
@@ -1505,7 +1521,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
               </div>
             )}
           </div>
-          {config.allowCredits && (
+          {config.allowCredits !== false && (
           <div className="px-6 mb-4">
               <p className="text-[10px] tracking-widest text-muted-foreground uppercase mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>Account Handling</p>
               <div className="grid grid-cols-2 gap-1.5">
@@ -1596,7 +1612,8 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
           )}
         </div>
         <div className="px-6 pb-6 pt-2 shrink-0">
-          <button onClick={handleCharge} disabled={!canCharge} className="w-full rounded-xl bg-primary text-primary-foreground py-4 font-bold tracking-widest transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
+          {chargeError && <p className="text-xs text-red-300">{chargeError}</p>}
+          <button onClick={handleCharge} disabled={!canCharge || charging} className="w-full rounded-xl bg-primary text-primary-foreground py-4 font-bold tracking-widest transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed" style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
             {isOnAccount
               ? `POST ${fmt(total, currency)} TO ACCOUNT`
               : isSettlement
@@ -1621,12 +1638,19 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
   const [name, setName] = useState(""); const [payFirst, setPayFirst] = useState(false);
   const [tabType, setTabType] = useState<"table" | "guest" | "walk-in">("table");
   const [prepaidInput, setPrepaidInput] = useState(""); const [customerId, setCustomerId] = useState("");
+  const [creditorQuery, setCreditorQuery] = useState("");
+  const [creditorSearch, setCreditorSearch] = useState("");
   const defaultCurrencySymbol = defaultCurrency(tenant.config).symbol;
   const nameInputId = "new-tab-name";
   const customerSelectId = "new-tab-customer";
   const prepaidInputId = "new-tab-prepaid";
   const requiresName = tabType !== "walk-in";
   const creditCustomers = tenant.customers.filter((c) => c.creditAllowed !== false);
+  const visibleCreditors = creditCustomers.filter((customer) => {
+    const query = creditorSearch.trim().toLowerCase();
+    if (!query) return true;
+    return [customer.name, customer.email, customer.phone].some((value) => (value ?? "").toLowerCase().includes(query));
+  });
   const selectedCreditor = tenant.customers.find((c) => c.id === customerId);
 
   const inputLabel = tabType === "table"
@@ -1673,16 +1697,20 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
             </div>
           </div>
           <div><label htmlFor={nameInputId} className="text-xs text-muted-foreground mb-1 block">{inputLabel}</label><input id={nameInputId} autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder={inputPlaceholder} className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/50" /></div>
-          {tenant.config.allowCredits && tenant.customers.length > 0 && (
+          {tenant.config.allowCredits !== false && tenant.customers.length > 0 && (
             <div className="rounded-xl border border-border bg-white/3 p-3">
               <p className="text-sm font-semibold mb-2">Creditors</p>
+              <div className="flex gap-2 mb-2">
+                <input value={creditorQuery} onChange={(e) => setCreditorQuery(e.target.value)} placeholder="Search customer by name, email, or phone" className="flex-1 rounded-lg bg-white/5 border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50" />
+                <button type="button" onClick={() => setCreditorSearch(creditorQuery)} className="rounded-lg border border-border px-3 py-2 text-sm">Search</button>
+              </div>
               <p className="text-[10px] text-muted-foreground mb-2" style={{ fontFamily: "'DM Mono', monospace" }}>
                 Only customers with credit allowed can be linked.
               </p>
               <label htmlFor={customerSelectId} className="text-xs text-muted-foreground mb-1 block">Link Creditor (optional)</label>
               <select id={customerSelectId} value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/50">
                 <option value="">— No Creditor Linked —</option>
-                {creditCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {visibleCreditors.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
               {selectedCreditor && (
                 <div className="mt-2 text-xs text-muted-foreground">
@@ -1715,10 +1743,11 @@ export function NewTabModal({ tenant, onClose, onCreate }: { tenant: Tenant; onC
 // SALES SECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales: SaleRecord[]; currency: Currency; staff?: StaffMember[]; menu?: MenuItem[] }) {
+export function SalesSection({ sales, currency: displayCurrency, staff = [], menu = [] }: { sales: SaleRecord[]; currency: Currency; staff?: StaffMember[]; menu?: MenuItem[] }) {
+  const currency: Currency = { ...displayCurrency, code: "ZAR", symbol: displayCurrency.code === "ZAR" ? displayCurrency.symbol : "R", rate: 1, name: "South African Rand" };
   const dayMs = 86400000;
   const allDates = Array.from(new Set(sales.map((s) => dateKey(s.timestamp)))).sort((a, b) => b.localeCompare(a));
-  const allMonths = Array.from(new Set(sales.map((s) => s.timestamp.toISOString().slice(0, 7)))).sort((a, b) => b.localeCompare(a));
+  const allMonths = Array.from(new Set(sales.map((s) => businessMonthKey(s.timestamp)))).sort((a, b) => b.localeCompare(a));
   const staffNameById = new Map(staff.map((s) => [s.id, s.name] as const));
   const cashierOptions = staff.map((s) => ({ id: s.id, name: s.name })).sort((a, b) => a.name.localeCompare(b.name));
   const [filterMode, setFilterMode] = useState<"daily" | "monthly">("daily");
@@ -1743,7 +1772,7 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
   const rangeActive = !!(rangeStart && rangeEnd);
   const now = new Date();
   const todayKey = dateKey(now);
-  const currentMonth = now.toISOString().slice(0, 7);
+  const currentMonth = businessMonthKey(now);
   const currentYear = now.getFullYear();
   const mondayOffset = (now.getDay() + 6) % 7;
   const thisWeekStart = new Date(now.getTime() - (mondayOffset * dayMs));
@@ -1781,7 +1810,7 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
     ? sales.filter((s) => s.timestamp >= effectiveRangeStart && s.timestamp <= effectiveRangeEnd)
     : filterMode === "daily"
       ? (selectedDate === "all" ? sales : sales.filter((s) => dateKey(s.timestamp) === selectedDate))
-      : (selectedMonth === "all" ? sales : sales.filter((s) => s.timestamp.toISOString().slice(0, 7) === selectedMonth));
+      : (selectedMonth === "all" ? sales : sales.filter((s) => businessMonthKey(s.timestamp) === selectedMonth));
   const cashierFiltered = selectedCashier === "all"
     ? periodFiltered
     : periodFiltered.filter((s) => s.staffId === selectedCashier);
@@ -1790,7 +1819,7 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
     ? cashierFiltered.filter((s) => s.tabName.toLowerCase().includes(searchNeedle))
     : cashierFiltered;
   const negativeItemIds = new Set(menu.filter((item) => item.stock !== -1 && item.stock < 0).map((item) => item.id));
-  const isNegativeSale = (sale: SaleRecord) => sale.items.some((line) => negativeItemIds.has(line.menuItem.id) || ((line.menuItem.stock ?? 0) < 0 && line.menuItem.stock !== -1));
+  const isNegativeSale = (sale: SaleRecord) => Boolean(sale.soldPastZero) || sale.items.some((line) => negativeItemIds.has(line.menuItem.id) || ((line.menuItem.stock ?? 0) < 0 && line.menuItem.stock !== -1));
   const negativeSalesCount = searchFiltered.filter(isNegativeSale).length;
   const filtered = salesScope === "negative-only"
     ? searchFiltered.filter(isNegativeSale)
@@ -1999,8 +2028,53 @@ export function SalesSection({ sales, currency, staff = [], menu = [] }: { sales
           </div>
           <button onClick={printReport} className="rounded-lg border border-border px-3 py-2 text-xs text-foreground hover:bg-white/5 flex items-center gap-1.5">
             <Printer size={12} />
-            Print
+            Print Report
           </button>
+        </div>
+      </div>
+      <div className="mb-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+        <label className="text-xs text-muted-foreground">Report granularity
+          <select aria-label="Report granularity" value={filterMode} onChange={(e) => setFilterMode(e.target.value as "daily" | "monthly")} className="mt-1 w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground">
+            <option value="daily">Daily</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </label>
+        <label className="text-xs text-muted-foreground">Range from
+          <input aria-label="Range from" type="date" value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} className="mt-1 w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground" />
+        </label>
+        <label className="text-xs text-muted-foreground">Range to
+          <input aria-label="Range to" type="date" value={rangeTo} onChange={(e) => setRangeTo(e.target.value)} className="mt-1 w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground" />
+        </label>
+        <label className="text-xs text-muted-foreground">Search table name
+          <input aria-label="Search table name" value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} className="mt-1 w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground" />
+        </label>
+        <label className="text-xs text-muted-foreground">Sales scope filter
+          <select aria-label="Sales scope filter" value={salesScope} onChange={(e) => setSalesScope(e.target.value as "all" | "negative-only")} className="mt-1 w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground">
+            <option value="all">All sales</option>
+            <option value="negative-only">Negative only</option>
+          </select>
+        </label>
+        <label className="text-xs text-muted-foreground">Quick profit filter
+          <select aria-label="Quick profit filter" value={quickFilter} onChange={(e) => setQuickFilter(e.target.value as typeof quickFilter)} className="mt-1 w-full rounded-lg bg-[#1a1510] border border-border px-3 py-2 text-sm text-foreground">
+            <option value="none">None</option>
+            <option value="this-month">This month</option>
+            <option value="this-year">This year</option>
+            <option value="last-7">Last 7 days</option>
+            <option value="last-30">Last 30 days</option>
+            <option value="last-90">Last 90 days</option>
+            <option value="this-week">This week</option>
+            <option value="previous-week">Previous week</option>
+          </select>
+        </label>
+        <div className="flex flex-wrap items-end gap-1">
+          <button type="button" onClick={() => setQuickFilter("last-7")} className="rounded-lg border border-border px-2 py-2 text-xs">Preset Last 7 Days</button>
+          <button type="button" onClick={() => setQuickFilter("this-week")} className="rounded-lg border border-border px-2 py-2 text-xs">Preset This Week</button>
+          <button type="button" onClick={() => setQuickFilter("previous-week")} className="rounded-lg border border-border px-2 py-2 text-xs">Preset Previous Week</button>
+          <button type="button" onClick={() => { setQuickFilter("none"); setRangeFrom(""); setRangeTo(""); }} className="rounded-lg border border-border px-2 py-2 text-xs">Clear preset filter</button>
+        </div>
+        <div className="flex items-end justify-between gap-2">
+          <p className="text-xs text-muted-foreground">Negative: {negativeSalesCount}</p>
+          <button type="button" onClick={() => setSalesScope("negative-only")} className="rounded-lg border border-border px-2 py-2 text-xs">Switch to Negative Sales Only</button>
         </div>
       </div>
       {effectiveRangeActive && (
@@ -2264,8 +2338,10 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
         const received = Number.isFinite(row.received) ? Math.max(0, row.received) : 0;
         const damaged = Number.isFinite(row.damaged) ? Math.max(0, row.damaged) : 0;
         const net = received - damaged;
-        if (net === 0) return item;
-        const nextStock = Math.max(item.stock + net, 0);
+        const priceChanged = row.newPrice !== undefined && row.newPrice !== item.price;
+        const currencyChanged = Boolean(row.currencyCode) && row.currencyCode !== item.currencyCode;
+        if (net === 0 && !priceChanged && !currencyChanged && !row.batchNo && !row.expiryDate) return item;
+        const nextStock = item.stock + net;
         changedLines.push({
           itemId: item.id,
           itemName: item.name,
@@ -2330,7 +2406,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
           received,
           damaged,
           net,
-          nextStock: Math.max(item.stock + net, 0),
+          nextStock: item.stock + net,
         };
       })
       .filter((row): row is { product: string; currentStock: number; received: number; damaged: number; net: number; nextStock: number } => row !== null);
@@ -2895,9 +2971,9 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                           <p className="text-xs text-muted-foreground truncate max-w-[200px]">{item.description}</p>
                         </td>
                         <td className="px-4 py-2.5 text-xs text-muted-foreground">{item.category}</td>
-                        <td className="px-4 py-2.5 text-right text-sm font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.price, defaultCurrency(config))}</td>
+                        <td className="px-4 py-2.5 text-right text-sm font-semibold" style={{ fontFamily: "'DM Mono', monospace" }}>{(config.currencies.find((currency) => currency.code === (item.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? "R")}{item.price.toFixed(2)}</td>
                         <td className="px-4 py-2.5 text-center text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{item.currencyCode ?? config.defaultCurrencyCode}</td>
-                        <td className="px-4 py-2.5 text-right text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.cost ?? 0, defaultCurrency(config))}</td>
+                        <td className="px-4 py-2.5 text-right text-xs text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{(config.currencies.find((currency) => currency.code === (item.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? "R")}{(item.cost ?? 0).toFixed(2)}</td>
                         <td className="px-4 py-2.5 text-center text-xs" style={{ fontFamily: "'DM Mono', monospace" }}>
                           <span className={item.stock===0?"text-red-400":item.stock===-1?"text-muted-foreground":"text-green-400"}>{item.stock===-1?"∞":`${item.stock}`}</span>
                         </td>
@@ -2906,7 +2982,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                         </td>
                         <td className="px-4 py-2.5 text-right whitespace-nowrap">
                           <button onClick={() => { setEditingProduct(item); setProductForm({...item}); }} className="p-1.5 text-muted-foreground hover:text-primary"><Edit2 size={13} /></button>
-                          <button onClick={() => update({ menu: menu.filter((m) => m.id!==item.id) })} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>
+                          <button onClick={() => { if (window.confirm(`Delete ${item.name}?`)) update({ menu: menu.filter((m) => m.id!==item.id) }); }} className="p-1.5 text-muted-foreground hover:text-red-400"><Trash2 size={13} /></button>
                         </td>
                       </tr>
                     ))}
@@ -2929,7 +3005,7 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   <span className={`flex-1 text-sm font-medium ${cat.enabled?"text-foreground":"text-muted-foreground"}`}>{cat.name}</span>
                   <span className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{menu.filter((m)=>m.category===cat.name).length} items</span>
                   <button onClick={() => { const en = config.categories.filter((c)=>c.enabled).length; if (cat.enabled && en<=1) return; updateConfig({ categories: config.categories.map((c)=>c.name===cat.name?{...c,enabled:!c.enabled}:c) }); }} className={`w-11 h-6 rounded-full relative ${cat.enabled?"bg-primary":"bg-white/10"}`}><span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${cat.enabled?"left-[22px]":"left-0.5"}`} /></button>
-                  <button onClick={() => { updateConfig({ categories: config.categories.filter((c)=>c.name!==cat.name) }); update({ menu: menu.filter((m)=>m.category!==cat.name) }); }} className="p-1 text-muted-foreground hover:text-red-400"><Trash2 size={12} /></button>
+                  <button onClick={() => { if (!window.confirm(`Delete category ${cat.name} and its products?`)) return; update({ menu: menu.filter((m)=>m.category!==cat.name), config: { ...config, categories: config.categories.filter((c)=>c.name!==cat.name) } }); }} className="p-1 text-muted-foreground hover:text-red-400"><Trash2 size={12} /></button>
                 </div>
               ))}
               <div className="rounded-xl border border-dashed border-border p-4 mt-4">
@@ -2993,14 +3069,15 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
                   <label className="text-xs text-muted-foreground uppercase tracking-widest mb-2 block" style={{ fontFamily: "'DM Mono', monospace" }}>VAT Rate</label>
                   <div className="flex items-center gap-3"><input type="number" min="0" max="100" step="0.5" value={config.vatRate} onChange={(e)=>updateConfig({vatRate:parseFloat(e.target.value)||0})} className="w-28 rounded-lg bg-white/5 border border-border px-4 py-3 text-foreground text-lg font-semibold focus:outline-none focus:border-primary/50" style={{ fontFamily: "'DM Mono', monospace" }} /><span className="text-2xl text-muted-foreground font-bold">%</span></div>
                   <p className="text-xs text-muted-foreground mt-2">South Africa standard rate: 15%</p>
+                  <div className="flex items-center justify-between mt-4"><div><p className="text-sm font-semibold">Prices include VAT</p><p className="text-xs text-muted-foreground">Shelf prices already contain VAT. Leave this off to add VAT on top.</p></div><button onClick={()=>updateConfig({vatPricesIncludeVat:!config.vatPricesIncludeVat})} className={`w-12 h-6 rounded-full relative ${config.vatPricesIncludeVat?"bg-primary":"bg-white/10"}`}><span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${config.vatPricesIncludeVat?"left-[26px]":"left-0.5"}`} /></button></div>
                 </div>
               )}
               <div className="rounded-xl border border-border bg-card/30 p-4">
-                <p className="text-xs text-muted-foreground mb-2 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Preview on {fmt(100, defaultCurrency(config))}</p>
+                <p className="text-xs text-muted-foreground mb-2 uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Preview on R100.00</p>
                 <div className="space-y-1 text-sm">
-                  <div className="flex justify-between"><span className="text-muted-foreground">Item</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(100, defaultCurrency(config))}</span></div>
-                  {config.vatEnabled&&<div className="flex justify-between"><span className="text-muted-foreground">VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(config.vatRate, defaultCurrency(config))}</span></div>}
-                  <div className="flex justify-between font-bold border-t border-border pt-1"><span>Total</span><span className="text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(100+(config.vatEnabled?config.vatRate:0), defaultCurrency(config))}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Item</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{splitVat(100, config).subtotal.toFixed(2)}</span></div>
+                  {config.vatEnabled&&<div className="flex justify-between"><span className="text-muted-foreground">VAT ({config.vatRate}%)</span><span style={{ fontFamily: "'DM Mono', monospace" }}>R{splitVat(100, config).tax.toFixed(2)}</span></div>}
+                  <div className="flex justify-between font-bold border-t border-border pt-1"><span>Total</span><span className="text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>R{splitVat(100, config).total.toFixed(2)}</span></div>
                 </div>
               </div>
             </div>
@@ -3346,10 +3423,11 @@ function AdminPanel({ tenant, currentStaffId, onTenantChange, onCredentialsUpdat
 
 function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; tenant: Tenant; onBack: () => void; }) {
   const configuredCurrency = defaultCurrency(tenant.config);
-  const sub = activeTab ? calcSubtotal(activeTab.orders) : 0;
-  const tax = calcTax(sub, tenant.config);
-  const total = sub + tax;
-  const totalConverted = total * configuredCurrency.rate;
+  const parts = splitVat(activeTab ? calcSubtotal(activeTab.orders, tenant.config.currencies) : 0, tenant.config);
+  const sub = parts.subtotal;
+  const tax = parts.tax;
+  const total = parts.total;
+  const totalConverted = fromBase(total, configuredCurrency.code, tenant.config.currencies);
   const prepaid = activeTab?.prepaid ?? 0;
   const balance = prepaid - totalConverted;
   const [now, setNow] = useState(new Date());
@@ -3372,7 +3450,7 @@ function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; t
               {prepaid > 0 && <div className="text-right"><p className="text-[10px] text-muted-foreground uppercase tracking-widest" style={{ fontFamily: "'DM Mono', monospace" }}>Prepaid</p><p className="text-lg font-bold text-green-400" style={{ fontFamily: "'DM Mono', monospace" }}>{configuredCurrency.symbol}{prepaid.toFixed(2)}</p></div>}
             </div>
             <div className="px-6 py-3 max-h-56 overflow-y-auto space-y-2">
-              {activeTab.orders.length === 0 ? <p className="text-sm text-muted-foreground text-center py-6">Your order will appear here…</p> : activeTab.orders.map((o) => <div key={o.menuItem.id} className="flex justify-between"><p className="text-sm font-medium">{o.qty}× {o.menuItem.name}</p><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price * o.qty, configuredCurrency)}</span></div>)}
+              {activeTab.orders.length === 0 ? <p className="text-sm text-muted-foreground text-center py-6">Your order will appear here…</p> : activeTab.orders.map((o) => <div key={o.menuItem.id} className="flex justify-between"><p className="text-sm font-medium">{o.qty}× {o.menuItem.name}</p><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, tenant.config.currencies) * o.qty, configuredCurrency)}</span></div>)}
             </div>
             {activeTab.orders.length > 0 && (
               <div className="px-6 py-4 border-t border-border space-y-1 bg-white/2">
@@ -3395,13 +3473,14 @@ function ClientDisplay({ activeTab, tenant, onBack }: { activeTab: Tab | null; t
 
 let _tabSeq = 10;
 
-function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, onClient, onLogout }: { tenant: Tenant; staffId: string; onTenantChange: (t: Tenant) => void; onSalePersisted: (sale: SaleRecord, updated: Tenant) => void; onAdmin: () => void; onClient: () => void; onLogout: () => void; }) {
+function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, onClient, onLogout }: { tenant: Tenant; staffId: string; onTenantChange: (t: Tenant) => void; onSalePersisted: (sale: SaleRecord, updated: Tenant) => void | Promise<void>; onAdmin: () => void; onClient: () => void; onLogout: () => void; }) {
   const [tabs, setTabs] = useState<Tab[]>(() => hydrateTabs(tenant.config.posState?.tabs));
   const [activeTabId, setActiveTabId] = useState<string | null>(() => tenant.config.posState?.activeTabId ?? null);
   const [activeCategory, setActiveCategory] = useState("All");
   const [payingTab, setPayingTab] = useState<Tab | null>(null);
   const [showNewTab, setShowNewTab] = useState(false);
   const [pendingSale, setPendingSale] = useState<SaleRecord | null>(null);
+  const [scanValue, setScanValue] = useState("");
   const [now, setNow] = useState(new Date());
   const tenantRef = useRef(tenant);
   useEffect(() => { const id = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(id); }, []);
@@ -3465,6 +3544,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
   function addToOrder(item: MenuItem) {
     if (!permissions.editOrders || !activeTabId) return;
     setTabs((prev) => {
+      if (item.stock !== -1 && getRemainingStock(item, prev) <= 0) return prev;
       return prev.map((tab) => {
       if (tab.id !== activeTabId) return tab;
       const existing = tab.orders.find((o) => o.menuItem.id === item.id);
@@ -3474,9 +3554,21 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
     });
   }
 
+  function applyScan() {
+    const needle = scanValue.trim().toLowerCase();
+    if (!needle) return;
+    const item = menu.find((entry) => entry.id.toLowerCase() === needle || entry.name.toLowerCase() === needle);
+    if (item) addToOrder(item);
+    setScanValue("");
+  }
+
   function changeQty(tabId: string, itemId: string, delta: number) {
     if (!permissions.editOrders) return;
     setTabs((prev) => {
+      if (delta > 0) {
+        const item = menu.find((entry) => entry.id === itemId);
+        if (item && item.stock !== -1 && getRemainingStock(item, prev) <= 0) return prev;
+      }
       return prev.map((tab) => { if (tab.id !== tabId) return tab; return { ...tab, orders: tab.orders.map((o) => o.menuItem.id === itemId ? { ...o, qty: o.qty + delta } : o).filter((o) => o.qty > 0) }; });
     });
   }
@@ -3494,45 +3586,39 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
     if (activeTabId === id) setActiveTabId(null);
   }
 
-  function handlePaymentComplete(sale: SaleRecord) {
-    const soldQtyByItem = sale.items.reduce<Record<string, number>>((acc, order) => {
-      acc[order.menuItem.id] = (acc[order.menuItem.id] ?? 0) + order.qty;
-      return acc;
-    }, {});
-    const nextMenu = tenant.menu.map((item) => {
-      if (item.stock === -1) return item;
-      const soldQty = soldQtyByItem[item.id] ?? 0;
-      if (!soldQty) return item;
-      return { ...item, stock: item.stock - soldQty };
-    });
-    let updated = { ...tenant, menu: nextMenu, sales: [sale, ...tenant.sales] };
+  async function handlePaymentComplete(sale: SaleRecord) {
+    const keepsOpenOrder = sale.accountAction === "settlement" || sale.accountAction === "deposit";
+    const creditDelta = customerCreditDelta(
+      sale.accountAction,
+      sale.total,
+      toBase(sale.accountAmount ?? 0, sale.currencyCode, tenant.config.currencies),
+    );
+    const movesSpend = sale.accountAction === "purchase" || sale.accountAction === "on-account" || !sale.accountAction;
+    let updated = { ...tenant, sales: [sale, ...tenant.sales] };
     if (sale.customerId) {
-      const creditDelta = sale.accountAction === "on-account"
-        ? -sale.totalConverted
-        : sale.accountAction === "settlement"
-          ? (sale.accountAmount ?? sale.totalConverted)
-          : sale.accountAction === "deposit"
-            ? (sale.accountAmount ?? sale.totalConverted)
-            : (sale.prepaid ?? 0) - sale.totalConverted;
-      updated.customers = tenant.customers.map((c) => c.id === sale.customerId
-        ? {
-          ...c,
-          totalSpent: c.totalSpent + sale.total,
-          visits: c.visits + 1,
-          creditBalance: roundMoney((c.creditBalance ?? 0) + creditDelta),
-        }
-        : c);
+      updated = {
+        ...updated,
+        customers: tenant.customers.map((customer) => customer.id === sale.customerId
+          ? {
+            ...customer,
+            totalSpent: customer.totalSpent + (movesSpend ? sale.total : 0),
+            visits: customer.visits + (movesSpend ? 1 : 0),
+            creditBalance: roundMoney((customer.creditBalance ?? 0) + creditDelta),
+          }
+          : customer),
+      };
     }
-    onSalePersisted(sale, updated);
-    if (payingTab) closeTabById(payingTab.id);
+    await onSalePersisted(sale, updated);
+    if (!keepsOpenOrder && payingTab) closeTabById(payingTab.id);
     setPayingTab(null);
-    setPendingSale(sale);
+    if (!keepsOpenOrder) setPendingSale(sale);
   }
 
-  const subtotal = activeTab ? calcSubtotal(activeTab.orders) : 0;
-  const tax = calcTax(subtotal, config);
-  const total = subtotal + tax;
-  const totalConverted = total * configuredCurrency.rate;
+  const orderParts = splitVat(activeTab ? calcSubtotal(activeTab.orders, config.currencies) : 0, config);
+  const subtotal = orderParts.subtotal;
+  const tax = orderParts.tax;
+  const total = orderParts.total;
+  const totalConverted = fromBase(total, configuredCurrency.code, config.currencies);
   const prepaid = activeTab?.prepaid ?? 0;
   const balance = prepaid > 0 ? prepaid - totalConverted : 0;
 
@@ -3552,12 +3638,12 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
           <button onClick={onLogout} className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-red-400 hover:border-red-900/30 transition-colors"><LogOut size={12} /></button>
         </div>
       </header>
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
         {/* Tabs sidebar */}
-        <aside className="w-48 shrink-0 border-r border-border bg-card/30 flex flex-col overflow-hidden">
+        <aside className="w-full lg:w-48 lg:shrink-0 max-h-40 lg:max-h-none border-b lg:border-b-0 lg:border-r border-border bg-card/30 flex flex-col overflow-hidden">
           <div className="flex items-center justify-between px-4 pt-4 pb-2"><span className="text-[10px] font-semibold tracking-widest text-muted-foreground uppercase" style={{ fontFamily: "'DM Mono', monospace" }}>Open Tabs</span><button onClick={()=>setShowNewTab(true)} disabled={!permissions.openTabs} className="rounded-md w-6 h-6 flex items-center justify-center bg-primary/20 text-primary hover:bg-primary/30 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={13} /></button></div>
           <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
-            {tabs.map((tab) => { const isActive = tab.id === activeTabId; const s = calcSubtotal(tab.orders); const t = s + calcTax(s, config); const pp = tab.prepaid ?? 0; return (
+            {tabs.map((tab) => { const isActive = tab.id === activeTabId; const t = splitVat(calcSubtotal(tab.orders, config.currencies), config).total; const pp = tab.prepaid ?? 0; return (
               <button key={tab.id} onClick={()=>setActiveTabId(tab.id)} className={`w-full text-left rounded-lg px-3 py-2.5 transition-all ${isActive?"bg-primary/15 border border-primary/25":"border border-transparent hover:bg-white/5"}`}>
                 <div className="flex items-start justify-between"><span className={`text-sm font-semibold truncate ${isActive?"text-primary":"text-foreground"}`}>{tab.name}</span><div className="flex items-center gap-1">{tab.customerId&&<span className="text-[9px] text-amber-300 font-bold ml-1 shrink-0">CR</span>}{pp>0&&<span className="text-[9px] text-green-400 font-bold ml-1 shrink-0">PP</span>}</div></div>
                 <div className="flex justify-between mt-0.5"><span className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{elapsed(tab.opened)}</span><span className="text-[11px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(t, configuredCurrency)}</span></div>
@@ -3571,6 +3657,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
         {/* Menu */}
         <main className="flex-1 flex flex-col overflow-hidden">
           <div className="flex items-center gap-1 px-4 pt-3 pb-2.5 border-b border-border shrink-0 overflow-x-auto">
+            <input aria-label="Scan product" value={scanValue} onChange={(e) => setScanValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") applyScan(); }} placeholder="Scan or type a product" className="mr-2 w-40 shrink-0 rounded-lg bg-white/5 border border-border px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50" />
             {enabledCats.map((cat) => <button key={cat} onClick={()=>setActiveCategory(cat)} className={`shrink-0 rounded-lg px-3.5 py-1.5 text-xs font-bold transition-all ${activeCategory===cat?"bg-primary text-primary-foreground":"text-muted-foreground hover:text-foreground hover:bg-white/5"}`} style={{ fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: "0.04em" }}>{cat.toUpperCase()}</button>)}
           </div>
           {!activeTabId && <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg bg-primary/8 border border-primary/20 px-4 py-2 text-xs text-primary/80"><AlertCircle size={13} /> Select or open a tab to start ordering</div>}
@@ -3578,10 +3665,10 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
             <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
               {filtered.map((item) => {
                 const remainingStock = getRemainingStock(item, tabs);
-                const oos = item.stock !== -1 && remainingStock === 0;
+                const oos = item.stock !== -1 && remainingStock <= 0;
                 const negativeSales = item.stock !== -1 && remainingStock < 0;
                 const oqty = activeTab?.orders.find((o) => o.menuItem.id === item.id)?.qty ?? 0;
-                const dis = !activeTabId || !permissions.editOrders;
+                const dis = !activeTabId || !permissions.editOrders || (item.stock !== -1 && remainingStock <= 0);
                 return (
                   <button key={item.id} onClick={()=>!dis&&addToOrder(item)} disabled={dis}
                     className={`group relative text-left rounded-xl border p-3.5 transition-all active:scale-[0.97] ${negativeSales ? "border-red-500/50 bg-red-950/25 ring-1 ring-red-500/40" : oos ? "border-amber-500/40 bg-amber-950/20 ring-1 ring-amber-500/30" : dis ? "border-border/50 bg-card/40 opacity-50 cursor-not-allowed" : "border-border bg-card hover:border-primary/30 hover:bg-primary/5 cursor-pointer"}`}>
@@ -3592,7 +3679,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                     <p className="text-sm font-semibold text-foreground pr-6 leading-tight" style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "0.92rem" }}>{item.name}</p>
                     <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-1">{item.description}</p>
                     <div className="flex items-end justify-between mt-2">
-                      <p className="text-sm font-bold text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(item.price, configuredCurrency)}</p>
+                      <p className="text-sm font-bold text-primary" style={{ fontFamily: "'DM Mono', monospace" }}>{(config.currencies.find((currency) => currency.code === (item.currencyCode ?? config.defaultCurrencyCode))?.symbol ?? configuredCurrency.symbol)}{item.price.toFixed(2)}</p>
                       {item.stock!==-1&&<p className={`text-[10px] ${negativeSales ? "text-red-300 font-semibold" : oos ? "text-amber-300 font-semibold" : "text-muted-foreground"}`} style={{ fontFamily: "'DM Mono', monospace" }}>{negativeSales ? `${Math.abs(remainingStock)} below stock` : oos ? "0 left" : `${remainingStock} left`}</p>}
                     </div>
                     {negativeSales && (
@@ -3609,7 +3696,7 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
         </main>
 
         {/* Order panel */}
-        <aside className="w-64 shrink-0 border-l border-border bg-card/50 flex flex-col overflow-hidden">
+        <aside className="w-full lg:w-64 lg:shrink-0 max-h-80 lg:max-h-none border-t lg:border-t-0 lg:border-l border-border bg-card/50 flex flex-col overflow-hidden">
           {activeTab ? (
             <>
               <div className="flex items-center justify-between px-4 pt-4 pb-3 border-b border-border shrink-0">
@@ -3733,33 +3820,30 @@ export default function App() {
 
   const persistTenantSnapshot = useCallback((snapshot: Tenant) => {
     if (!tenantToken) return;
-    apiSaveTenant(snapshot.email, makeTenantSavePatch(snapshot), tenantToken).catch(console.error);
+    apiSaveTenant(snapshot.email, makeTenantSavePatch(snapshot), tenantToken).catch(async (error: unknown) => {
+      const status = (error as { status?: number })?.status;
+      if (status !== 409) return;
+      try {
+        const fresh = await apiGetTenant(snapshot.email, tenantToken);
+        setTenant(rowToTenant(fresh));
+      } catch {
+        console.error(error);
+      }
+    });
   }, [tenantToken]);
 
   const verifyBackend = useCallback(async () => {
     setBackendStatus("checking");
     setBackendMessage("Connecting to Supabase API...");
     try {
-      const res = await fetch(`${API_BASE}/auth/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-        },
-        body: JSON.stringify({ email: "healthcheck@invalid.local", password: "invalid" }),
-      });
-
-      const reachableStatus = res.ok || [400, 401, 403, 422].includes(res.status);
-      if (!reachableStatus) {
+      const res = await fetch(`${API_BASE}/health`);
+      if (!res.ok) {
         setBackendStatus("down");
-        if (res.status === 404) {
-          setBackendMessage("Supabase edge function was not found (404). Deploy the 'server' function and confirm VITE_API_BASE points to /functions/v1/server.");
-        } else {
-          setBackendMessage(`Supabase API returned unexpected status (${res.status}). Verify function deployment and environment settings.`);
-        }
+        setBackendMessage(res.status === 404
+          ? "Supabase edge function was not found (404). Deploy the 'server' function and confirm VITE_API_BASE points to /functions/v1/server."
+          : `Supabase API returned unexpected status (${res.status}). Verify function deployment and environment settings.`);
         return;
       }
-
       setBackendStatus("ready");
       setBackendMessage("");
     } catch {
@@ -3782,6 +3866,8 @@ export default function App() {
   }
 
   function handleVenueLogout() {
+    const email = tenant?.email;
+    const token = tenantToken;
     if (tenant) {
       if (saveTimer.current) {
         clearTimeout(saveTimer.current);
@@ -3789,6 +3875,7 @@ export default function App() {
       }
       persistTenantSnapshot(tenant);
     }
+    if (email && token) void apiLogout(email, token).catch(() => undefined);
     setTenant(null);
     setTenantToken(null);
     setSession(null);
@@ -3828,14 +3915,38 @@ export default function App() {
   }
 
   // Immediate sale persist + customer update
-  function handleSalePersisted(sale: SaleRecord, updatedTenant: Tenant) {
-    setTenant(updatedTenant);
-    if (!tenantToken) return;
-    apiAddSale(updatedTenant.email, { ...sale, timestamp: sale.timestamp.toISOString() }, tenantToken).catch(console.error);
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      apiSaveTenant(updatedTenant.email, { customers: updatedTenant.customers, menu: updatedTenant.menu }, tenantToken).catch(console.error);
-    }, 500);
+  async function handleSalePersisted(sale: SaleRecord, updatedTenant: Tenant) {
+    if (!tenantToken) throw new Error("Sign in again before charging.");
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const result = await apiAddSale(updatedTenant.email, {
+      id: sale.id,
+      tabName: sale.tabName,
+      items: sale.items.map((order) => ({ menuItemId: order.menuItem.id, qty: order.qty })),
+      paymentMethod: sale.paymentMethod,
+      currencyCode: sale.currencyCode,
+      currencySymbol: sale.currencySymbol,
+      customerId: sale.customerId,
+      accountAction: sale.accountAction,
+      accountAmount: sale.accountAmount,
+      prepaid: sale.prepaid,
+      change: sale.change,
+      cashTendered: sale.cashTendered,
+      timestamp: sale.timestamp.toISOString(),
+      staffId: sale.staffId,
+    }, tenantToken);
+    const savedSale = result.sale
+      ? { ...sale, ...result.sale, timestamp: new Date(result.sale.timestamp ?? sale.timestamp) }
+      : sale;
+    setTenant({
+      ...updatedTenant,
+      menu: result.menu ?? updatedTenant.menu,
+      customers: result.customers ?? updatedTenant.customers,
+      updatedAt: result.updatedAt ?? updatedTenant.updatedAt,
+      sales: [savedSale, ...updatedTenant.sales.filter((existing) => existing.id !== savedSale.id)],
+    });
   }
 
   if (backendStatus !== "ready") {
@@ -3868,14 +3979,18 @@ export default function App() {
   const activePermissions = activeStaff?.permissions ?? defaultPermissionsForRole(activeStaff?.role ?? "bartender");
 
   if (!staffConfirmed) {
-    return <StaffSelector tenant={tenant} onSelect={(staffId) => { setSession({ ...session, staffId }); setStaffConfirmed(true); }} onBack={handleVenueLogout} />;
+    return <StaffSelector tenant={tenant} onSelect={(staffId, staffToken) => { setSession({ ...session, staffId }); if (staffToken) setTenantToken(staffToken); setStaffConfirmed(true); }} onBack={handleVenueLogout} />;
   }
 
   if (screen === "admin") {
     if (!activePermissions.adminAccess) return <POSView tenant={tenant} staffId={session.staffId} onTenantChange={updateTenant} onSalePersisted={handleSalePersisted} onAdmin={() => undefined} onClient={() => setScreen("client")} onLogout={handleVenueLogout} />;
     return <AdminPanel tenant={tenant} currentStaffId={session.staffId} onTenantChange={updateTenant} onCredentialsUpdate={handleTenantCredentialsUpdate} onBack={() => setScreen("pos")} />;
   }
-  if (screen === "client") return <ClientDisplay activeTab={null} tenant={tenant} onBack={() => setScreen("pos")} />;
+  if (screen === "client") {
+    const openTabs = hydrateTabs(tenant.config.posState?.tabs);
+    const activeTab = openTabs.find((tab) => tab.id === tenant.config.posState?.activeTabId) ?? openTabs[0] ?? null;
+    return <ClientDisplay activeTab={activeTab} tenant={tenant} onBack={() => setScreen("pos")} />;
+  }
 
   return (
     <POSView
