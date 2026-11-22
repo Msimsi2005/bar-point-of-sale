@@ -480,7 +480,10 @@ async function mergeStaffPins(existing: any[], incoming: any[]) {
   for (const member of incoming ?? []) {
     const prior = previous.get(member?.id);
     const incomingPin = typeof member?.pin === "string" ? member.pin.trim() : "";
-    const pinChanged = Boolean(incomingPin) && incomingPin !== prior?.pin && !incomingPin.startsWith("pbkdf2$");
+    const storedPin = String(prior?.pin ?? "");
+    const pinChanged = Boolean(incomingPin)
+      && !incomingPin.startsWith("pbkdf2$")
+      && !(await verifyPassword(incomingPin, storedPin));
     const pin = pinChanged ? await hashPassword(incomingPin) : (prior?.pin || "");
     const { pin: _ignored, ...rest } = member ?? {};
     next.push({
