@@ -1176,9 +1176,13 @@ export function VenueLogin({ onLogin, onBack }: { onLogin: (t: Tenant, tenantTok
 // STAFF PIN SELECTOR
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect: (staffId: string, staffToken?: string) => void; onBack: () => void; }) {
+export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; onSelect: (staffId: string, staffToken?: string, refreshed?: Tenant) => void; onBack: () => void; }) {
   const [selected, setSelected] = useState<StaffMember | null>(null);
   const [pin, setPin] = useState(""); const [error, setError] = useState(false);
+  const [replacement, setReplacement] = useState<{ staffId: string; staffToken: string } | null>(null);
+  const [nextPin, setNextPin] = useState("");
+  const [changeError, setChangeError] = useState("");
+  const [changing, setChanging] = useState(false);
 
   function failPin() {
     setError(true); setPin(""); setTimeout(() => setError(false), 1200);
@@ -1193,10 +1197,32 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
     }
     try {
       const result = await apiStartStaffSession(tenant.email, selected.id, p, tenant.tenantToken ?? "");
-      if (result.pinIsDefault) window.alert("PIN 1234 is still the default. Change it in Admin before the next shift.");
+      if (result.pinIsDefault || selected.pinMustChange) {
+        setReplacement({ staffId: selected.id, staffToken: result.staffToken });
+        setNextPin("");
+        setChangeError("");
+        return;
+      }
       onSelect(selected.id, result.staffToken);
     } catch {
       failPin();
+    }
+  }
+
+  async function saveReplacementPin() {
+    if (!replacement || changing) return;
+    if (!/^\d{4}$/.test(nextPin) || nextPin === "1234") {
+      setChangeError("Choose a 4-digit PIN other than 1234.");
+      return;
+    }
+    setChanging(true);
+    setChangeError("");
+    try {
+      const response = await apiUpdateTenantCredentials(tenant.email, { staffId: replacement.staffId, pin: nextPin }, replacement.staffToken);
+      onSelect(replacement.staffId, response.tenantToken ?? replacement.staffToken, rowToTenant(response));
+    } catch (e: unknown) {
+      setChangeError(e instanceof Error ? e.message : "The new PIN was not saved.");
+      setChanging(false);
     }
   }
 
@@ -1204,6 +1230,22 @@ export function StaffSelector({ tenant, onSelect, onBack }: { tenant: Tenant; on
     const np = pin + d;
     setPin(np);
     if (np.length === 4) setTimeout(() => tryPin(np), 100);
+  }
+
+  if (replacement && selected) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center px-4" style={{ fontFamily: "'Barlow', sans-serif" }}>
+        <div className="w-80 text-center">
+          <TenantBrandMark businessInfo={tenant.businessInfo} size="md" className="mx-auto mb-3" />
+          <p className="text-lg font-bold mb-1">{selected.name}</p>
+          <p className="text-sm text-muted-foreground mb-4">1234 cannot open the owner tools. Choose a new PIN before this shift continues.</p>
+          <input value={nextPin} onChange={(e) => setNextPin(e.target.value.replace(/\D/g, "").slice(0, 4))} inputMode="numeric" maxLength={4} placeholder="New 4-digit PIN" className="w-full rounded-lg bg-white/5 border border-border px-4 py-3 text-center text-lg tracking-[0.4em] text-foreground focus:outline-none focus:border-primary/50" style={{ fontFamily: "'DM Mono', monospace" }} />
+          {changeError && <p className="mt-3 text-xs text-red-300">{changeError}</p>}
+          <button onClick={saveReplacementPin} disabled={changing || nextPin.length !== 4} className="mt-4 w-full rounded-xl bg-primary text-primary-foreground py-3 text-sm font-bold disabled:opacity-40">Save new PIN</button>
+          <button onClick={() => { setReplacement(null); setSelected(null); setPin(""); }} className="mt-3 text-xs text-muted-foreground">Use a different staff member</button>
+        </div>
+      </div>
+    );
   }
 
   if (selected) {
@@ -3998,7 +4040,7 @@ export default function App() {
   const activePermissions = activeStaff?.permissions ?? defaultPermissionsForRole(activeStaff?.role ?? "bartender");
 
   if (!staffConfirmed) {
-    return <StaffSelector tenant={tenant} onSelect={(staffId, staffToken) => { setSession({ ...session, staffId }); if (staffToken) setTenantToken(staffToken); setStaffConfirmed(true); }} onBack={handleVenueLogout} />;
+    return <StaffSelector tenant={tenant} onSelect={(staffId, staffToken, refreshed) => { if (refreshed) setTenant(refreshed); setSession({ ...session, staffId }); if (staffToken) setTenantToken(staffToken); setStaffConfirmed(true); }} onBack={handleVenueLogout} />;
   }
 
   if (screen === "admin") {

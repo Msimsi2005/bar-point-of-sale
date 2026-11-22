@@ -453,7 +453,12 @@ function rolePermissions(role: string) {
   return { adminAccess: false, editProducts: false, editCategories: false, editPayments: false, editCurrencies: false, editVat: false, editBusiness: false, manageStaff: false, manageCustomers: false, viewSales: false, manageSystem: false, openTabs: true, editOrders: true, chargeTabs: true, useClientDisplay: true };
 }
 
+function tillOnlyPermissions() {
+  return { adminAccess: false, editProducts: false, editCategories: false, editPayments: false, editCurrencies: false, editVat: false, editBusiness: false, manageStaff: false, manageCustomers: false, viewSales: true, manageSystem: false, openTabs: true, editOrders: true, chargeTabs: true, useClientDisplay: true };
+}
+
 function permissionsOf(member: any) {
+  if (member?.pinMustChange) return tillOnlyPermissions();
   const defaults = rolePermissions(member?.role === "owner" || member?.role === "manager" ? member.role : "bartender");
   const raw = member?.permissions && typeof member.permissions === "object" ? member.permissions : {};
   const next: Record<string, boolean> = {};
@@ -464,7 +469,7 @@ function permissionsOf(member: any) {
 function publicStaff(staff: any[]) {
   return (staff ?? []).map((member) => {
     const { pin: _pin, ...rest } = member ?? {};
-    return { ...rest, hasPin: Boolean(member?.pin) };
+    return { ...rest, hasPin: Boolean(member?.pin), pinMustChange: Boolean(member?.pinMustChange), permissions: permissionsOf(member) };
   });
 }
 
@@ -787,12 +792,21 @@ app.patch("/server/admin/tenants/:email", async (c) => {
 
   if (typeof body.password === "string" && body.password.trim().length > 0) {
     updates.password_hash = await hashPassword(body.password);
+    try {
+      const currentConfig = await ensureExistingConfig();
+      const currentVersion = Number(currentConfig?.authVersion ?? 0);
+      updates.config = { ...(updates.config as any ?? currentConfig), authVersion: currentVersion + 1 };
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Failed to load tenant config" }, 400);
+    }
   }
 
   if (typeof body.paused === "boolean") {
     try {
       const currentConfig = await ensureExistingConfig();
-      updates.config = { ...currentConfig, paused: body.paused, authVersion: Number(currentConfig?.authVersion ?? 0) + 1 };
+      const currentVersion = Number(currentConfig?.authVersion ?? 0);
+      const plannedVersion = Number((updates.config as any)?.authVersion ?? currentVersion);
+      updates.config = { ...(updates.config as any ?? currentConfig), paused: body.paused, authVersion: Math.max(plannedVersion, currentVersion + 1) };
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Failed to load tenant config" }, 400);
     }
@@ -1038,16 +1052,23 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
-  if (!String(member.pin ?? "").startsWith("pbkdf2$")) {
-    const staff = (tenant.staff ?? []).map((staff: any) => staff?.id === member.id ? { ...staff, pin: await hashPassword(supplied), pinMustChange: supplied === "1234" } : staff);
-    await supabase.from("tenants").update({ staff }).eq("email", email);
+  const mustChange = supplied === "1234";
+  if (!String(member.pin ?? "").startsWith("pbkdf2$") || (mustChange && member.pinMustChange !== true)) {
+    const staff = (tenant.staff ?? []).map((staff: any) => staff?.id === member.id ? {
+      ...staff,
+      pin: String(staff.pin ?? "").startsWith("pbkdf2$") ? staff.pin : await hashPassword(supplied),
+      pinMustChange: mustChange,
+    } : staff);
+    const { error: pinError } = await supabase.from("tenants").update({ staff }).eq("email", email);
+    if (pinError) return c.json({ error: pinError.message }, 400);
+    member.pinMustChange = mustChange;
   }
   const staffToken = await createTenantToken(email, {
     staffId: member.id,
     jti: crypto.randomUUID(),
     v: Number(tenant.config?.authVersion ?? 0),
   });
-  return c.json({ staffToken, pinIsDefault: supplied === "1234", staff: publicStaff([member])[0] });
+  return c.json({ staffToken, pinIsDefault: mustChange || member.pinMustChange === true, staff: publicStaff([member])[0] });
 });
 
 app.post("/server/tenant/:email/logout", async (c) => {
@@ -1140,6 +1161,7 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
 
   if (typeof body.pin === "string") {
     if (!/^\d{4}$/.test(body.pin)) return c.json({ error: "PIN must be exactly 4 digits" }, 400);
+    if (body.pin === "1234") return c.json({ error: "Choose a PIN other than 1234" }, 400);
     const staffId = typeof body.staffId === "string" ? body.staffId : "";
     if (!staffId) return c.json({ error: "Staff ID is required to update PIN" }, 400);
     const staff = Array.isArray(existing.staff) ? existing.staff : [];
