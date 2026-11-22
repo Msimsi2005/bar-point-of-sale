@@ -349,7 +349,7 @@ async function reserveStaffPinAttempt(supabase: any, pinKey: string, rateKey: st
       return false;
     }
   });
-  return { blocked };
+  return blocked;
 }
 
 function auditEvent(c: any, event: string, status: "ok" | "denied" | "error", details: Record<string, unknown> = {}) {
