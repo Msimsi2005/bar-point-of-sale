@@ -135,7 +135,7 @@ function trimSecurityState(state: SecurityState) {
 async function loadSecurityStateRecord(supabase: any) {
   const { data, error } = await supabase
     .from("tenants")
-    .select("config")
+    .select("config, updated_at")
     .eq("email", SECURITY_STATE_EMAIL)
     .maybeSingle();
   if (error) throw new Error(error.message);
@@ -161,31 +161,32 @@ async function loadSecurityStateRecord(supabase: any) {
       staff: [],
     };
 
-    const { error: createError } = await supabase.from("tenants").insert(systemRow);
+    const { data: created, error: createError } = await supabase.from("tenants").insert(systemRow).select("updated_at").maybeSingle();
     if (createError) throw new Error(createError.message);
-    return { config: systemRow.config, state: defaultSecurityState() };
+    return { config: systemRow.config, state: defaultSecurityState(), updatedAt: created?.updated_at ?? null };
   }
 
   const config = data?.config ?? {};
   const state = sanitizeSecurityState(config?.securityState ?? {});
-  return { config, state };
+  return { config, state, updatedAt: data?.updated_at ?? null };
 }
 
-async function saveSecurityStateRecord(supabase: any, config: any, state: SecurityState) {
-  trimSecurityState(state);
-  const nextConfig = {
-    ...(config ?? {}),
-    securityState: state,
-  };
-
+async function commitSecurityMutation(supabase: any, mutate: (state: SecurityState) => void) {
   let lastError = "Failed to save security state";
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const { error } = await supabase
-      .from("tenants")
-      .update({ config: nextConfig })
-      .eq("email", SECURITY_STATE_EMAIL);
-    if (!error) return;
-    lastError = error.message;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const loaded = await loadSecurityStateRecord(supabase);
+    const state = JSON.parse(JSON.stringify(loaded.state)) as SecurityState;
+    mutate(state);
+    trimSecurityState(state);
+    const nextConfig = { ...(loaded.config ?? {}), securityState: state };
+    let query = supabase.from("tenants").update({ config: nextConfig }).eq("email", SECURITY_STATE_EMAIL);
+    if (loaded.updatedAt) query = query.eq("updated_at", loaded.updatedAt);
+    const { data, error } = await query.select("updated_at").maybeSingle();
+    if (error) {
+      lastError = error.message;
+      continue;
+    }
+    if (data) return { config: nextConfig, state, updatedAt: data.updated_at ?? loaded.updatedAt };
   }
   throw new Error(lastError);
 }
@@ -684,9 +685,11 @@ app.post("/server/admin/login", async (c) => {
   }
 
   const ip = getClientIp(c);
-  const loginRate = checkRateLimit("admin_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000, securityRecord.state);
+  let loginRate = { allowed: true, remaining: 0, retryAfterMs: 0 };
   try {
-    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    await commitSecurityMutation(supabase, (state) => {
+      loginRate = checkRateLimit("admin_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000, state);
+    });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
@@ -711,9 +714,11 @@ app.post("/server/admin/login", async (c) => {
   }
 
   if (normalizedEmail !== SUPERADMIN_EMAIL || !isValidSuperAdminPassword(String(password ?? ""))) {
-    const failure = recordAuthFailure(authKey, securityRecord.state);
+    let failure = { failures: 0, locked: false, retryAfterMs: 0 };
     try {
-      await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+      await commitSecurityMutation(supabase, (state) => {
+        failure = recordAuthFailure(authKey, state);
+      });
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
     }
@@ -725,15 +730,17 @@ app.post("/server/admin/login", async (c) => {
     return c.json({ error: "Invalid superadmin credentials" }, 401);
   }
 
-  clearAuthFailures(authKey, securityRecord.state);
   const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, "");
+  const tokenHash = await sha256Hex(token);
   const nowSec = Math.floor(Date.now() / 1000);
-  securityRecord.state.adminSessions = [
-    ...securityRecord.state.adminSessions.filter((session) => session.exp > nowSec),
-    { tokenHash: await sha256Hex(token), exp: nowSec + (60 * 60 * 12) },
-  ].slice(-20);
   try {
-    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    await commitSecurityMutation(supabase, (state) => {
+      clearAuthFailures(authKey, state);
+      state.adminSessions = [
+        ...state.adminSessions.filter((session) => session.exp > nowSec),
+        { tokenHash, exp: nowSec + (60 * 60 * 12) },
+      ].slice(-20);
+    });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
@@ -902,9 +909,11 @@ app.post("/server/auth/login", async (c) => {
   }
 
   const ip = getClientIp(c);
-  const loginRate = checkRateLimit("tenant_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000, securityRecord.state);
+  let loginRate = { allowed: true, remaining: 0, retryAfterMs: 0 };
   try {
-    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    await commitSecurityMutation(supabase, (state) => {
+      loginRate = checkRateLimit("tenant_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000, state);
+    });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
@@ -934,9 +943,11 @@ app.post("/server/auth/login", async (c) => {
     .maybeSingle();
   if (error) return c.json({ error: error.message }, 400);
   if (!tenant) {
-    const failure = recordAuthFailure(authKey, securityRecord.state);
+    let failure = { failures: 0, locked: false, retryAfterMs: 0 };
     try {
-      await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+      await commitSecurityMutation(supabase, (state) => {
+        failure = recordAuthFailure(authKey, state);
+      });
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
     }
@@ -955,9 +966,11 @@ app.post("/server/auth/login", async (c) => {
   }
 
   if (!passwordOk) {
-    const failure = recordAuthFailure(authKey, securityRecord.state);
+    let failure = { failures: 0, locked: false, retryAfterMs: 0 };
     try {
-      await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+      await commitSecurityMutation(supabase, (state) => {
+        failure = recordAuthFailure(authKey, state);
+      });
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
     }
@@ -965,9 +978,10 @@ app.post("/server/auth/login", async (c) => {
     return c.json({ error: "Invalid email or password" }, failure.locked ? 429 : 401);
   }
 
-  clearAuthFailures(authKey, securityRecord.state);
   try {
-    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    await commitSecurityMutation(supabase, (state) => {
+      clearAuthFailures(authKey, state);
+    });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
@@ -1055,10 +1069,13 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
   const member = (tenant.staff ?? []).find((staff: any) => staff?.id === staffId);
   const supplied = String(pin ?? "");
   if (!/^\d{4}$/.test(supplied) || !member || !(await verifyPassword(supplied, String(member.pin ?? "")))) {
-    const failure = recordAuthFailure(pinKey, securityRecord.state);
-    const pinRate = checkRateLimit("staff_pin_fail", `${email}:${String(staffId ?? "")}`, 8, 60_000, securityRecord.state);
+    let failure = { failures: 0, locked: false, retryAfterMs: 0 };
+    let pinRate = { allowed: true, remaining: 0, retryAfterMs: 0 };
     try {
-      await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+      await commitSecurityMutation(supabase, (state) => {
+        failure = recordAuthFailure(pinKey, state);
+        pinRate = checkRateLimit("staff_pin_fail", `${email}:${String(staffId ?? "")}`, 8, 60_000, state);
+      });
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
     }
@@ -1069,9 +1086,10 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
     }
     return c.json({ error: "Wrong PIN" }, 401);
   }
-  clearAuthFailures(pinKey, securityRecord.state);
   try {
-    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    await commitSecurityMutation(supabase, (state) => {
+      clearAuthFailures(pinKey, state);
+    });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
