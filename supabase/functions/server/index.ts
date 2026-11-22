@@ -237,7 +237,7 @@ function checkRateLimit(scope: string, key: string, maxRequests: number, windowM
   return { allowed: true, remaining: Math.max(maxRequests - bucket.count, 0), retryAfterMs: 0 };
 }
 
-function authFailureKey(scope: "admin" | "tenant", email: string, ip: string) {
+function authFailureKey(scope: "admin" | "tenant" | "pin", email: string, ip: string) {
   return `${scope}:${normalizeEmail(email)}:${ip}`;
 }
 
@@ -404,10 +404,11 @@ async function verifyPassword(pw: string, stored: string): Promise<boolean> {
     const actual = await pbkdf2Bytes(pw, b64ToBytes(saltB64), iterations);
     return timingSafeEqual(actual, b64ToBytes(hashB64));
   }
-  const legacy = await sha256Hex(pw);
-  const storedBytes = new TextEncoder().encode(legacy);
-  const givenBytes = new TextEncoder().encode(stored);
-  return timingSafeEqual(storedBytes, givenBytes);
+  if (/^[0-9a-f]{64}$/i.test(stored)) {
+    const legacy = await sha256Hex(pw);
+    return timingSafeEqual(new TextEncoder().encode(legacy), new TextEncoder().encode(stored.toLowerCase()));
+  }
+  return timingSafeEqual(new TextEncoder().encode(pw), new TextEncoder().encode(stored));
 }
 
 function roundMoney(value: number) {
@@ -467,14 +468,22 @@ function publicStaff(staff: any[]) {
   });
 }
 
-function mergeStaffPins(existing: any[], incoming: any[]) {
+async function mergeStaffPins(existing: any[], incoming: any[]) {
   const previous = new Map((existing ?? []).map((member) => [member?.id, member]));
-  return (incoming ?? []).map((member) => {
+  const next = [];
+  for (const member of incoming ?? []) {
     const prior = previous.get(member?.id);
-    const incomingPin = typeof member?.pin === "string" ? member.pin : "";
-    const pin = incomingPin || prior?.pin || "";
-    return { ...member, pin };
-  });
+    const incomingPin = typeof member?.pin === "string" ? member.pin.trim() : "";
+    const pinChanged = Boolean(incomingPin) && incomingPin !== prior?.pin && !incomingPin.startsWith("pbkdf2$");
+    const pin = pinChanged ? await hashPassword(incomingPin) : (prior?.pin || "");
+    const { pin: _ignored, ...rest } = member ?? {};
+    next.push({
+      ...rest,
+      pin,
+      pinMustChange: pinChanged ? incomingPin === "1234" : Boolean(prior?.pinMustChange),
+    });
+  }
+  return next;
 }
 
 function mergeConfig(existing: any, incoming: any, permissions: Record<string, boolean>) {
@@ -616,10 +625,13 @@ app.use("/server/tenant/*", async (c, next) => {
 
   const version = Number(tenant.config?.authVersion ?? 0);
   const revoked = Array.isArray(tenant.config?.revokedJti) ? tenant.config.revokedJti : [];
-  if (payload.staffId && Number(payload.v ?? 0) !== version) {
+  if (tenant.config?.paused === true) {
+    return c.json({ error: "This business is paused. Contact superadmin." }, 403);
+  }
+  if (Number(payload.v ?? -1) !== version) {
     return c.json({ error: "Session expired. Sign in again." }, 401);
   }
-  if (payload.jti && revoked.includes(payload.jti)) {
+  if (!payload.jti || revoked.includes(payload.jti)) {
     return c.json({ error: "Session expired. Sign in again." }, 401);
   }
 
@@ -927,7 +939,10 @@ app.post("/server/auth/login", async (c) => {
   if (salesError) return c.json({ error: salesError.message }, 400);
 
   const sales = (salesRows ?? []).map((row: any) => ({ ...(row.sale ?? {}), savedAt: row.saved_at }));
-  const tenantToken = await createTenantToken(normalizedEmail);
+  const tenantToken = await createTenantToken(normalizedEmail, {
+    jti: crypto.randomUUID(),
+    v: Number(tenant.config?.authVersion ?? 0),
+  });
   return c.json(toTenantResponse(tenant, sales, tenantToken));
 });
 
@@ -978,13 +993,50 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
   if (auth?.staffId) return c.json({ error: "Use the venue login before choosing staff" }, 400);
   const { staffId, pin } = await c.req.json();
   const supabase = db();
+  let securityRecord: { config: any; state: SecurityState };
+  try {
+    securityRecord = await loadSecurityStateRecord(supabase);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to load security state" }, 500);
+  }
+  const ip = getClientIp(c);
+  const pinKey = authFailureKey("pin", `${email}:${String(staffId ?? "")}`, "staff");
+  const lockState = getAuthLockState(pinKey, securityRecord.state);
+  const pinRate = checkRateLimit("staff_pin", `${email}:${ip}`, 8, 60_000, securityRecord.state);
+  try {
+    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  }
+  if (lockState.locked || !pinRate.allowed) {
+    const retryAfterMs = lockState.locked ? lockState.retryAfterMs : pinRate.retryAfterMs;
+    c.header("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
+    return c.json({ error: "Too many PIN attempts. Please retry shortly." }, 429);
+  }
   const { data: tenant, error } = await loadTenant(supabase, email);
   if (error) return c.json({ error: error.message }, 400);
   if (!tenant) return c.json({ error: "Not found" }, 404);
+  if (tenant.config?.paused === true) return c.json({ error: "This business is paused. Contact superadmin." }, 403);
   const member = (tenant.staff ?? []).find((staff: any) => staff?.id === staffId);
   const supplied = String(pin ?? "");
-  if (!member || !(await verifyPassword(supplied, String(member.pin ?? "")))) {
+  if (!/^\d{4}$/.test(supplied) || !member || !(await verifyPassword(supplied, String(member.pin ?? "")))) {
+    const failure = recordAuthFailure(pinKey, securityRecord.state);
+    try {
+      await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+    } catch (e: unknown) {
+      return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+    }
+    if (failure.locked) {
+      c.header("Retry-After", String(Math.ceil(failure.retryAfterMs / 1000)));
+      return c.json({ error: "Too many PIN attempts. Please retry shortly." }, 429);
+    }
     return c.json({ error: "Wrong PIN" }, 401);
+  }
+  clearAuthFailures(pinKey, securityRecord.state);
+  try {
+    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
+  } catch (e: unknown) {
+    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
   if (!String(member.pin ?? "").startsWith("pbkdf2$")) {
     const staff = (tenant.staff ?? []).map((staff: any) => staff?.id === member.id ? { ...staff, pin: await hashPassword(supplied), pinMustChange: supplied === "1234" } : staff);
@@ -1029,7 +1081,7 @@ app.put("/server/tenant/:email", async (c) => {
   if (body.businessInfo !== undefined && permissions.editBusiness) patch.business_info = body.businessInfo;
   if (body.menu !== undefined && permissions.editProducts) patch.menu = body.menu;
   if (body.customers !== undefined && permissions.manageCustomers) patch.customers = body.customers;
-  if (body.staff !== undefined && permissions.manageStaff) patch.staff = mergeStaffPins(existing.staff ?? [], body.staff);
+  if (body.staff !== undefined && permissions.manageStaff) patch.staff = await mergeStaffPins(existing.staff ?? [], body.staff);
   if (body.config !== undefined) patch.config = mergeConfig(existing.config ?? {}, body.config, permissions);
   if (Object.keys(patch).length === 0) return c.json(toTenantResponse(existing, []));
 
@@ -1119,11 +1171,11 @@ app.patch("/server/tenant/:email/credentials", async (c) => {
   }
 
   const actor = c.get("tenantAuth");
-  const tenantToken = await createTenantToken(nextEmail, actor?.staffId ? {
-    staffId: actor.staffId,
+  const tenantToken = await createTenantToken(nextEmail, {
+    ...(actor?.staffId ? { staffId: actor.staffId } : {}),
     jti: crypto.randomUUID(),
     v: Number(updated.config?.authVersion ?? 0),
-  } : {});
+  });
   return c.json(toTenantResponse(updated, [], tenantToken));
 });
 
@@ -1219,7 +1271,16 @@ app.post("/server/tenant/:email/sale", async (c) => {
       const baseUnit = toBase(Number(product.price) || 0, product.currencyCode, currencies);
       grossBase += baseUnit * qty;
       priced.push({
-        menuItem: { id: product.id, name: product.name, price: Number(product.price) || 0, currencyCode: product.currencyCode || "ZAR", basePrice: roundMoney(baseUnit) },
+        menuItem: {
+          id: product.id,
+          name: product.name,
+          description: String(product.description ?? ""),
+          category: String(product.category ?? ""),
+          price: Number(product.price) || 0,
+          cost: roundMoney(toBase(Number(product.cost ?? 0) || 0, product.currencyCode, currencies)),
+          currencyCode: product.currencyCode || "ZAR",
+          basePrice: roundMoney(baseUnit),
+        },
         qty,
       });
       if (tracked) product.stock = stock - qty;

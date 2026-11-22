@@ -1499,7 +1499,7 @@ export function PaymentModal({ tab, tenant, staffId, onClose, onComplete }: { ta
         </div>
         <div className="flex-1 overflow-y-auto">
           <div className="px-6 pt-4 pb-2 max-h-28 overflow-y-auto space-y-1">
-            {tab.orders.map((o) => <div key={o.menuItem.id} className="flex justify-between text-sm"><span className="text-muted-foreground">{o.qty}× {o.menuItem.name}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price * o.qty, currency)}</span></div>)}
+            {tab.orders.map((o) => <div key={o.menuItem.id} className="flex justify-between text-sm"><span className="text-muted-foreground">{o.qty}× {o.menuItem.name}</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies) * o.qty, currency)}</span></div>)}
           </div>
           <div className="mx-6 mt-2 mb-4 rounded-xl bg-white/3 border border-amber-900/10 px-4 py-3 space-y-1">
             <div className="flex justify-between text-sm text-muted-foreground"><span>Subtotal</span><span style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(subtotal, currency)}</span></div>
@@ -1835,7 +1835,7 @@ export function SalesSection({ sales, currency: displayCurrency, staff = [], men
   const avgTicket = filtered.length > 0 ? totalRevenue / filtered.length : 0;
 
   const itemMap: Record<string, { name: string; qty: number; revenue: number }> = {};
-  filtered.forEach((sale) => sale.items.forEach((o) => { if (!itemMap[o.menuItem.id]) itemMap[o.menuItem.id] = { name: o.menuItem.name, qty: 0, revenue: 0 }; itemMap[o.menuItem.id].qty += o.qty; itemMap[o.menuItem.id].revenue += o.menuItem.price * o.qty; }));
+  filtered.forEach((sale) => sale.items.forEach((o) => { if (!itemMap[o.menuItem.id]) itemMap[o.menuItem.id] = { name: o.menuItem.name, qty: 0, revenue: 0 }; itemMap[o.menuItem.id].qty += o.qty; itemMap[o.menuItem.id].revenue += (o.menuItem.basePrice ?? o.menuItem.price) * o.qty; }));
   const topItems = Object.values(itemMap).sort((a, b) => b.qty - a.qty).slice(0, 5);
   const maxTopItemQty = topItems[0]?.qty ?? 1;
   const payBreak: Record<string, number> = {};
@@ -3718,13 +3718,13 @@ function POSView({ tenant, staffId, onTenantChange, onSalePersisted, onAdmin, on
                       const remaining = getRemainingStock(tracked, tabs);
                       return remaining < 0 ? "bg-red-950/20 border border-red-500/25" : "bg-white/3 border border-white/5";
                     })()}`}>
-                      <div className="flex-1 min-w-0"><p className="text-xs font-medium truncate">{o.menuItem.name}</p><p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price, configuredCurrency)} ea</p></div>
+                      <div className="flex-1 min-w-0"><p className="text-xs font-medium truncate">{o.menuItem.name}</p><p className="text-[10px] text-muted-foreground" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies), configuredCurrency)} ea</p></div>
                       <div className="flex items-center gap-1 shrink-0">
                         <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,-1)} disabled={!permissions.editOrders} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Minus size={9} /></button>
                         <span className="text-xs font-bold w-4 text-center" style={{ fontFamily: "'DM Mono', monospace" }}>{o.qty}</span>
                         <button onClick={()=>changeQty(activeTab.id,o.menuItem.id,1)} disabled={!permissions.editOrders || (() => { const item = menu.find((menuItem) => menuItem.id === o.menuItem.id); return !item; })()} className="w-5 h-5 rounded bg-white/5 hover:bg-white/15 text-muted-foreground hover:text-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"><Plus size={9} /></button>
                       </div>
-                      <span className="text-xs font-semibold w-12 text-right shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(o.menuItem.price*o.qty, configuredCurrency)}</span>
+                      <span className="text-xs font-semibold w-12 text-right shrink-0" style={{ fontFamily: "'DM Mono', monospace" }}>{fmt(toBase(o.menuItem.price, o.menuItem.currencyCode, config.currencies) * o.qty, configuredCurrency)}</span>
                     </div>
                   ))}
               </div>
@@ -3820,7 +3820,15 @@ export default function App() {
 
   const persistTenantSnapshot = useCallback((snapshot: Tenant) => {
     if (!tenantToken) return;
-    apiSaveTenant(snapshot.email, makeTenantSavePatch(snapshot), tenantToken).catch(async (error: unknown) => {
+    apiSaveTenant(snapshot.email, makeTenantSavePatch(snapshot), tenantToken).then((saved) => {
+      const nextUpdatedAt = typeof saved?.updatedAt === "string" ? saved.updatedAt : "";
+      if (!nextUpdatedAt) return;
+      setTenant((current) => {
+        if (!current || current.email !== snapshot.email) return current;
+        if (snapshot.updatedAt && current.updatedAt && current.updatedAt !== snapshot.updatedAt) return current;
+        return { ...current, updatedAt: nextUpdatedAt };
+      });
+    }).catch(async (error: unknown) => {
       const status = (error as { status?: number })?.status;
       if (status !== 409) return;
       try {
@@ -3938,7 +3946,18 @@ export default function App() {
       staffId: sale.staffId,
     }, tenantToken);
     const savedSale = result.sale
-      ? { ...sale, ...result.sale, timestamp: new Date(result.sale.timestamp ?? sale.timestamp) }
+      ? {
+        ...sale,
+        ...result.sale,
+        items: Array.isArray(result.sale.items)
+          ? result.sale.items.map((line: SaleRecord["items"][number], index: number) => ({
+            ...sale.items[index],
+            ...line,
+            menuItem: { ...sale.items[index]?.menuItem, ...line.menuItem },
+          }))
+          : sale.items,
+        timestamp: new Date(result.sale.timestamp ?? sale.timestamp),
+      }
       : sale;
     setTenant({
       ...updatedTenant,
