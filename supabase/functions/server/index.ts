@@ -1013,18 +1013,10 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to load security state" }, 500);
   }
-  const ip = getClientIp(c);
   const pinKey = authFailureKey("pin", `${email}:${String(staffId ?? "")}`, "staff");
   const lockState = getAuthLockState(pinKey, securityRecord.state);
-  const pinRate = checkRateLimit("staff_pin", `${email}:${ip}`, 8, 60_000, securityRecord.state);
-  try {
-    await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
-  }
-  if (lockState.locked || !pinRate.allowed) {
-    const retryAfterMs = lockState.locked ? lockState.retryAfterMs : pinRate.retryAfterMs;
-    c.header("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
+  if (lockState.locked) {
+    c.header("Retry-After", String(Math.ceil(lockState.retryAfterMs / 1000)));
     return c.json({ error: "Too many PIN attempts. Please retry shortly." }, 429);
   }
   const { data: tenant, error } = await loadTenant(supabase, email);
@@ -1035,13 +1027,15 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
   const supplied = String(pin ?? "");
   if (!/^\d{4}$/.test(supplied) || !member || !(await verifyPassword(supplied, String(member.pin ?? "")))) {
     const failure = recordAuthFailure(pinKey, securityRecord.state);
+    const pinRate = checkRateLimit("staff_pin_fail", `${email}:${String(staffId ?? "")}`, 8, 60_000, securityRecord.state);
     try {
       await saveSecurityStateRecord(supabase, securityRecord.config, securityRecord.state);
     } catch (e: unknown) {
       return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
     }
-    if (failure.locked) {
-      c.header("Retry-After", String(Math.ceil(failure.retryAfterMs / 1000)));
+    if (failure.locked || !pinRate.allowed) {
+      const retryAfterMs = failure.locked ? failure.retryAfterMs : pinRate.retryAfterMs;
+      c.header("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
       return c.json({ error: "Too many PIN attempts. Please retry shortly." }, 429);
     }
     return c.json({ error: "Wrong PIN" }, 401);
