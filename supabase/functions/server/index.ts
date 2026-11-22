@@ -171,12 +171,12 @@ async function loadSecurityStateRecord(supabase: any) {
   return { config, state, updatedAt: data?.updated_at ?? null };
 }
 
-async function commitSecurityMutation(supabase: any, mutate: (state: SecurityState) => void) {
+async function commitSecurityMutation(supabase: any, mutate: (state: SecurityState) => boolean | void) {
   let lastError = "Failed to save security state";
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 8; attempt++) {
     const loaded = await loadSecurityStateRecord(supabase);
     const state = JSON.parse(JSON.stringify(loaded.state)) as SecurityState;
-    mutate(state);
+    if (mutate(state) === false) return { config: loaded.config, state: loaded.state, updatedAt: loaded.updatedAt };
     trimSecurityState(state);
     const nextConfig = { ...(loaded.config ?? {}), securityState: state };
     let query = supabase.from("tenants").update({ config: nextConfig }).eq("email", SECURITY_STATE_EMAIL);
@@ -189,6 +189,24 @@ async function commitSecurityMutation(supabase: any, mutate: (state: SecuritySta
     if (data) return { config: nextConfig, state, updatedAt: data.updated_at ?? loaded.updatedAt };
   }
   throw new Error(lastError);
+}
+
+async function clearFailuresUnlessLocked(supabase: any, key: string) {
+  let blocked = { locked: false, retryAfterMs: 0 };
+  try {
+    await commitSecurityMutation(supabase, (state) => {
+      const lock = getAuthLockState(key, state);
+      if (lock.locked) {
+        blocked = lock;
+        return false;
+      }
+      clearAuthFailures(key, state);
+    });
+  } catch {
+    const fresh = await loadSecurityStateRecord(supabase);
+    blocked = getAuthLockState(key, fresh.state);
+  }
+  return blocked;
 }
 
 function getClientIp(c: any): string {
@@ -677,19 +695,14 @@ app.use("/server/tenant/*", async (c, next) => {
 // ── SUPERADMIN: login ────────────────────────────────────────────────────────
 app.post("/server/admin/login", async (c) => {
   const supabase = db();
-  let securityRecord: { config: any; state: SecurityState };
-  try {
-    securityRecord = await loadSecurityStateRecord(supabase);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to load security state" }, 500);
-  }
-
   const ip = getClientIp(c);
   let loginRate = { allowed: true, remaining: 0, retryAfterMs: 0 };
+  let authState: SecurityState;
   try {
-    await commitSecurityMutation(supabase, (state) => {
+    const committed = await commitSecurityMutation(supabase, (state) => {
       loginRate = checkRateLimit("admin_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000, state);
     });
+    authState = committed.state;
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
@@ -702,7 +715,7 @@ app.post("/server/admin/login", async (c) => {
   const { email, password } = await c.req.json();
   const normalizedEmail = normalizeEmail(String(email ?? ""));
   const authKey = authFailureKey("admin", normalizedEmail, ip);
-  const lockState = getAuthLockState(authKey, securityRecord.state);
+  const lockState = getAuthLockState(authKey, authState);
   if (lockState.locked) {
     auditEvent(c, "admin.login", "denied", { reason: "locked", email: normalizedEmail, retryAfterMs: lockState.retryAfterMs });
     c.header("Retry-After", String(Math.ceil(lockState.retryAfterMs / 1000)));
@@ -733,8 +746,14 @@ app.post("/server/admin/login", async (c) => {
   const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, "");
   const tokenHash = await sha256Hex(token);
   const nowSec = Math.floor(Date.now() / 1000);
+  let blocked = { locked: false, retryAfterMs: 0 };
   try {
     await commitSecurityMutation(supabase, (state) => {
+      const lock = getAuthLockState(authKey, state);
+      if (lock.locked) {
+        blocked = lock;
+        return false;
+      }
       clearAuthFailures(authKey, state);
       state.adminSessions = [
         ...state.adminSessions.filter((session) => session.exp > nowSec),
@@ -743,6 +762,11 @@ app.post("/server/admin/login", async (c) => {
     });
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  }
+  if (blocked.locked) {
+    auditEvent(c, "admin.login", "denied", { reason: "locked", email: normalizedEmail, retryAfterMs: blocked.retryAfterMs });
+    c.header("Retry-After", String(Math.ceil(blocked.retryAfterMs / 1000)));
+    return c.json({ error: "Account temporarily locked due to repeated failures." }, 429);
   }
   auditEvent(c, "admin.login", "ok", { email: normalizedEmail });
   return c.json({ token });
@@ -901,19 +925,14 @@ app.delete("/server/admin/tenants/:email", async (c) => {
 // ── VENUE: login ─────────────────────────────────────────────────────────────
 app.post("/server/auth/login", async (c) => {
   const supabase = db();
-  let securityRecord: { config: any; state: SecurityState };
-  try {
-    securityRecord = await loadSecurityStateRecord(supabase);
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to load security state" }, 500);
-  }
-
   const ip = getClientIp(c);
   let loginRate = { allowed: true, remaining: 0, retryAfterMs: 0 };
+  let authState: SecurityState;
   try {
-    await commitSecurityMutation(supabase, (state) => {
+    const committed = await commitSecurityMutation(supabase, (state) => {
       loginRate = checkRateLimit("tenant_login", ip, Math.max(1, RATE_LIMITS.loginPerMinute), 60_000, state);
     });
+    authState = committed.state;
   } catch (e: unknown) {
     return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
   }
@@ -929,7 +948,7 @@ app.post("/server/auth/login", async (c) => {
   const normalizedEmail = normalizeEmail(email);
   if (normalizedEmail === SECURITY_STATE_EMAIL) return c.json({ error: "Invalid email or password" }, 401);
   const authKey = authFailureKey("tenant", normalizedEmail, ip);
-  const lockState = getAuthLockState(authKey, securityRecord.state);
+  const lockState = getAuthLockState(authKey, authState);
   if (lockState.locked) {
     auditEvent(c, "tenant.login", "denied", { reason: "locked", email: normalizedEmail, retryAfterMs: lockState.retryAfterMs });
     c.header("Retry-After", String(Math.ceil(lockState.retryAfterMs / 1000)));
@@ -978,12 +997,11 @@ app.post("/server/auth/login", async (c) => {
     return c.json({ error: "Invalid email or password" }, failure.locked ? 429 : 401);
   }
 
-  try {
-    await commitSecurityMutation(supabase, (state) => {
-      clearAuthFailures(authKey, state);
-    });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  const stillLocked = await clearFailuresUnlessLocked(supabase, authKey);
+  if (stillLocked.locked) {
+    auditEvent(c, "tenant.login", "denied", { reason: "locked", email: normalizedEmail, retryAfterMs: stillLocked.retryAfterMs });
+    c.header("Retry-After", String(Math.ceil(stillLocked.retryAfterMs / 1000)));
+    return c.json({ error: "Account temporarily locked due to repeated failures." }, 429);
   }
   auditEvent(c, "tenant.login", "ok", { email: normalizedEmail });
 
@@ -1086,12 +1104,10 @@ app.post("/server/tenant/:email/staff/session", async (c) => {
     }
     return c.json({ error: "Wrong PIN" }, 401);
   }
-  try {
-    await commitSecurityMutation(supabase, (state) => {
-      clearAuthFailures(pinKey, state);
-    });
-  } catch (e: unknown) {
-    return c.json({ error: e instanceof Error ? e.message : "Failed to save security state" }, 500);
+  const stillLocked = await clearFailuresUnlessLocked(supabase, pinKey);
+  if (stillLocked.locked) {
+    c.header("Retry-After", String(Math.ceil(stillLocked.retryAfterMs / 1000)));
+    return c.json({ error: "Too many PIN attempts. Please retry shortly." }, 429);
   }
   const mustChange = supplied === "1234";
   if (!String(member.pin ?? "").startsWith("pbkdf2$") || (mustChange && member.pinMustChange !== true)) {
